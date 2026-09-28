@@ -5,7 +5,9 @@ Description: >
   Multi-AZ PostgreSQL ledger database, a customer-managed KMS key, a NAT
   gateway, an internet-facing load balancer, an Auto Scaling group of
   Graviton workers, a Redis replication group, the reconciler function and
-  its queue, two alarms, and moves the index table to provisioned capacity.
+  its queue, a reports bucket and an access-logs bucket with server access
+  logging on the event archive, two alarms, and moves the index table to
+  provisioned capacity.
 
 Parameters:
   Environment:
@@ -71,6 +73,86 @@ Resources:
           - Id: ExpireOldEvents
             Status: Enabled
             ExpirationInDays: 365
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: events-archive/
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub payments-access-logs-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${AccessLogsBucket.Arn}/events-archive/*
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  ReconcilerReports:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub payments-reconciler-reports-${Environment}-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref LedgerKey
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TierAndExpireReports
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+            ExpirationInDays: 730
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -403,6 +485,14 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:Query
                 Resource: !GetAtt LedgerIndex.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub ${ReconcilerReports.Arn}/*
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                Resource: !GetAtt LedgerKey.Arn
 
   ReconcilerFunction:
     Type: AWS::Lambda::Function
@@ -419,6 +509,7 @@ Resources:
       Environment:
         Variables:
           LEDGER_TABLE: !Ref LedgerIndex
+          REPORTS_BUCKET: !Ref ReconcilerReports
       Code:
         ZipFile: |
           def handler(event, context):
@@ -486,3 +577,5 @@ Outputs:
     Value: !GetAtt SessionCache.PrimaryEndPoint.Address
   ReconcilerQueueUrl:
     Value: !Ref ReconcilerQueue
+  ReportsBucket:
+    Value: !Ref ReconcilerReports
