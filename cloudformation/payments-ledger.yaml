@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  payments-ledger: event archive, lookup table, and alerting for the payments
+  service. Baseline version: every resource here is usage-based, so the fixed
+  monthly cost of this stack is zero.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment, used in resource names and tags.
+
+Resources:
+  EventsArchive:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub payments-events-archive-${Environment}-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldEvents
+            Status: Enabled
+            ExpirationInDays: 365
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  LedgerIndex:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub payments-ledger-index-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: paymentId
+          AttributeType: S
+        - AttributeName: eventTime
+          AttributeType: S
+      KeySchema:
+        - AttributeName: paymentId
+          KeyType: HASH
+        - AttributeName: eventTime
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  LedgerAlerts:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub payments-ledger-alerts-${Environment}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+Outputs:
+  ArchiveBucket:
+    Value: !Ref EventsArchive
+  IndexTable:
+    Value: !Ref LedgerIndex
+  AlertsTopic:
+    Value: !Ref LedgerAlerts
