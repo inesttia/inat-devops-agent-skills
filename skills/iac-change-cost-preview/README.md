@@ -17,6 +17,7 @@ Autonomous agents and CI pipelines can tell you whether a template is valid and 
 - **Fixed versus usage-based discipline.** Instance hours, node hours, gateway hours, load balancer hours, provisioned capacity, storage, keys, and secrets are estimated. Requests, bytes, and invocations are named with their unit rate and excluded from the total unless the user supplies a volume.
 - **One table, one total.** A row per resource with its change (Add, Modify, Remove, Replace), sizing, live rate, and monthly cost, then a total fixed monthly estimate. Markdown, so it renders in chat and in a pull request comment.
 - **Read-mostly.** The only write is the change set, which never touches a resource and is deleted when the preview is done.
+- **Works without AWS tools.** Inside a release readiness review there is no `use_aws`. The skill still classifies every change, extracts sizing, names the price dimension per row, and emits a pricing worksheet (JSON). Paste the worksheet into a chat session with `use_aws` to get the priced table without repeating the analysis, or commit a dated rate snapshot to the repository and the review comment shows figures marked ⏱ (not live).
 
 ## Prerequisites
 
@@ -92,7 +93,7 @@ The archive must contain `SKILL.md` at the root of the skill directory with `ref
 
 Skills load when the agent judges them relevant to the task at hand; they have no event trigger of their own. Three ways to get a preview onto every pull request:
 
-1. **Release readiness review.** Enable the review for the repository. Whether the review consults space-level skills during its own analysis is not documented; test it by opening a PR that adds a fixed-cost resource and checking the report. If the preview appears, no further wiring is needed.
+1. **Release readiness review.** Enable the review for the repository. The review does load the skill (tested), but its runtime has no AWS tools, so the comment contains the analysis table with costs `pending` and the pricing worksheet. To see figures in the comment itself, commit `cost-preview/rates.<region>.json` (see the reference file for the format) and refresh it on a schedule; figures then appear marked ⏱. For live figures, paste the worksheet into a chat session.
 2. **Scheduled custom agent.** Model on `custom-agents/devops-agent-cost-dashboard`: a custom agent that runs on a schedule, lists open pull requests touching template paths, and invokes this skill for each new or updated one. Posting the result back to the PR requires a repository write tool in the Agent Space.
 3. **CI job.** A GitHub Actions workflow on `pull_request` that runs an agent CLI in headless mode with the repository checked out, then posts the output with `gh pr comment`. The skill folder is the same; only the runner's AWS role changes, so keep it read-only plus the change set actions above.
 

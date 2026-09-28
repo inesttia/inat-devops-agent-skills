@@ -112,6 +112,7 @@ aws pricing get-products --service-code <ServiceCode> --region us-east-1 \
 | Unit | `GB-Mo` |
 | Monthly | `rate × AllocatedStorage` |
 | Filters (PIOPS) | `productFamily=Provisioned IOPS`, `deploymentOption`, `regionCode`; unit `IOPS-Mo`; quantity `Iops` (io1) or `Iops − 12000` for gp3 above the baseline on instances that support it |
+| Implicit resources | `ManageMasterUserPassword: true` creates one AWS Secrets Manager secret: add a `<LogicalId> · master secret` row priced with the `AWS::SecretsManager::Secret` entry below. `EnablePerformanceInsights` with `PerformanceInsightsRetentionPeriod` > 7 days is a paid tier (`usagetype=<PREFIX>-RDS:PI_LTR-<class>`); confirm the value with `GetAttributeValues`. |
 | Usage-based | backup storage beyond 100% of allocated storage, data transfer |
 | Notes | `MultiAZ: true` doubles nothing in the formula: the Multi-AZ product already carries the standby. `deploymentOption=Multi-AZ (readable standbys)` is for `MultiAZ` DB clusters (`AWS::RDS::DBCluster` with `DBClusterInstanceClass`). |
 
@@ -218,6 +219,26 @@ Print the resource, the price dimension, and its unit rate. Do not compute a mon
 | `AWS::CloudFront::Distribution` | `AmazonCloudFront` | data transfer, requests |
 | `AWS::Route53::HostedZone` | `AmazonRoute53` | fixed per hosted zone-month (`HostedZone`), queries usage-based |
 | IAM, `AWS::SSM::Parameter` (Standard), `AWS::EC2::SecurityGroup`, `AWS::EC2::Subnet`, `AWS::EC2::VPC`, `AWS::EC2::RouteTable` | — | no charge |
+
+---
+
+## Rate snapshot format (optional, repository-owned)
+
+A repository may commit `cost-preview/rates.<region>.json` so that worksheet mode (no AWS tool, for example inside a release readiness review) can show figures. The repository owner generates it from the Price List API; the skill only reads it, applies the 30-day and same-Region checks from the Rate snapshot rule, and marks every figure taken from it ⏱.
+
+```json
+{
+  "generated_at": "2026-09-28T09:00:00Z",
+  "region": "eu-west-1",
+  "source": "pricing:GetProducts, endpoint us-east-1",
+  "rates": [
+    {"service_code": "AmazonRDS", "filters": {"regionCode": "eu-west-1", "instanceType": "db.r6g.large", "databaseEngine": "PostgreSQL", "deploymentOption": "Multi-AZ", "licenseModel": "No license required"}, "unit": "Hrs", "price_per_unit_usd": 0.0},
+    {"service_code": "AmazonEC2", "filters": {"usagetype": "EU-NatGateway-Hours"}, "unit": "Hrs", "price_per_unit_usd": 0.0}
+  ]
+}
+```
+
+`price_per_unit_usd` values above are placeholders; a real snapshot holds the values the Price List API returned when it was generated. A worksheet entry matches a snapshot entry when `service_code` and every filter are equal. Rows with no match stay `pending`.
 
 ---
 

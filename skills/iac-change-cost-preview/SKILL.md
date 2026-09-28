@@ -16,6 +16,11 @@ This skill answers one question for an infrastructure change that has not been d
 
 It works on CloudFormation templates (including SAM templates and CDK-synthesized output) coming from a pull request, a branch, a commit, or pasted directly into the conversation. It produces one table with a row per resource that will be created, modified, or removed, showing the sizing that drives its cost, the live per-Region rate with a verification marker, and its monthly cost, followed by a total fixed monthly estimate. The billing model behind each rate (what is billed, in which unit, what is included) is checked against the AWS documentation with the DevOps Agent **verify claims** system skill. Usage-based charges are named, not guessed.
 
+The skill runs in two kinds of runtime and behaves differently in each (Two-phase rule):
+
+- **Full mode**: an AWS tool (`use_aws`) is available. The skill creates a change set, resolves live rates, and prints a priced table.
+- **Worksheet mode**: no AWS tool is available, which is the case inside a release readiness review. The skill still finds the changed templates, classifies every resource, extracts sizing, and names the price dimension for each row, then prints the table with costs marked `pending` and a machine-readable **pricing worksheet**. A later run in full mode prices the worksheet without redoing the analysis. If the repository carries a rate snapshot (Rate snapshot rule), worksheet mode can fill the numbers from it, labelled as not live.
+
 The skill is read-mostly. Its only write operation is creating a CloudFormation change set, which does not touch any resource and is deleted when the preview is done.
 
 ### Execution visibility
@@ -24,12 +29,12 @@ Show each `use_aws` call, each rate lookup, and the change set identifier in the
 
 ## Workflow Checklist
 
-- [ ] Step 0: Collect inputs (change source, target account, Region, stack, parameters)
+- [ ] Step 0: Detect the runtime (full or worksheet mode) and collect inputs (change source, target account, Region, stack, parameters)
 - [ ] Step 1: Find the changed templates in the change source
 - [ ] Step 2: Determine resource changes (change set first, static diff as fallback)
 - [ ] Step 3: Cross-check additions and removals against the live topology
 - [ ] Step 4: Extract the sizing properties that drive cost
-- [ ] Step 5: Resolve a live rate for every fixed-cost resource
+- [ ] Step 5: Resolve a live rate for every fixed-cost resource (full mode), or emit the pricing worksheet (worksheet mode)
 - [ ] Step 5b: Verify the billing model behind each rate against the documentation (verify claims)
 - [ ] Step 6: Compute the monthly delta
 - [ ] Step 7: Report in the fixed layout
@@ -51,18 +56,24 @@ These rules are referenced by name throughout the steps.
 
 **730-hour rule.** A month is 730 hours for hourly charges. State this once in the report.
 
+**Two-phase rule.** Steps 1 to 4 need only the repository content; Steps 2 (change set), 3, and 5 need an AWS tool. When no AWS tool is available, do not stop and do not report rows as `not priced`, because no lookup was attempted. Complete Steps 1 to 4 from the templates (static diff), name the price dimension and quantity for every fixed-cost row, and print the table with `pending` in the Monthly cost column plus the pricing worksheet (Step 5c). A run that receives a worksheet and has an AWS tool skips Steps 1 to 4 and prices it. The report header always states the mode.
+
+**Rate snapshot rule.** A repository may carry a rate snapshot the repository owner generated from the Price List API: `cost-preview/rates.<region>.json`, one entry per price dimension the skill uses, with `generated_at`, `region`, `service_code`, `filters`, `unit`, and `price_per_unit_usd`. In worksheet mode the skill may fill Monthly cost from the snapshot **only if** the snapshot's Region equals the target Region and `generated_at` is within 30 days; every such figure carries the marker ⏱ and the header says `rates: snapshot <file>, generated <date> (not live)`. A snapshot never overrides a live lookup in full mode, is never edited by the skill, and its absence is not an error. The snapshot is the repository owner's artifact, not the skill's; the skill still ships no rates.
+
 **Topology rule.** Account topology answers "does this already exist?" and "what depends on this?". It never determines cost. A resource that appears in the template and already exists outside the stack is flagged as a possible duplicate; it is still priced as an addition because CloudFormation will create it.
 
 **Read-only rule.** The skill creates and deletes change sets and reads stacks, templates, resources, and prices. It never executes a change set, never deploys, and never modifies a resource. If the environment's permission guardrail asks for approval to create the change set, explain that it is non-mutating and will be deleted, and wait.
 
-## Step 0: Collect inputs
+## Step 0: Detect the runtime and collect inputs
 
-Resolve these before doing anything else. Ask for whatever is missing.
+First decide the mode (Two-phase rule): if `use_aws` or an equivalent AWS tool is available, run in **full mode**; otherwise run in **worksheet mode** and say so in the first line of the report. Inside a release readiness review, expect worksheet mode. If the input is itself a pricing worksheet from an earlier worksheet-mode run and an AWS tool is available, go straight to Step 5 with it.
+
+Then resolve these inputs. Ask for whatever is missing; in worksheet mode, where nobody can answer, record the gap under Assumptions and continue.
 
 | Input | How to resolve it |
 |---|---|
 | Change source | A pull request or merge request reference, a branch or commit, or a template pasted in the conversation. Read repository content through the repository integration tools available in the Agent Space (GitHub or GitLab). If none is configured, ask the user to paste the base and head templates. |
-| Target account | From the user or the pipeline configuration in the repository. Never assume the Agent Space account. |
+| Target account | From the user or the pipeline configuration in the repository (for example an `Account` column in `cloudformation/README.md`, a `samconfig.toml` profile, or a `cdk.json` environment). Never assume the Agent Space account. In worksheet mode, a missing account is recorded under Assumptions and does not block the analysis. |
 | Target Region | Region rule. From the stack, the pipeline configuration, or the user. |
 | Stack name | Existing stack the template deploys to, from the pipeline configuration (for example a `deploy` step, `samconfig.toml`, `cdk.json` outputs, or a stack name tag) or the user. If no stack exists yet, the whole template is an addition. |
 | Parameters | Parameter values the pipeline passes at deploy time. Without them, use the template defaults and list every parameter that was defaulted in the report. |
@@ -108,7 +119,7 @@ use_aws(
 
 Record the change set ID in the report. If any step here is denied by permissions or the permission guardrail, fall back to the static diff and say why.
 
-### Fallback: static template diff
+### Fallback: static template diff (always used in worksheet mode)
 
 Parse `Resources` in the base and head templates and classify each logical ID:
 
@@ -120,6 +131,8 @@ Parse `Resources` in the base and head templates and classify each logical ID:
 Then apply what can be read statically: skip resources whose `Condition` evaluates to false with the resolved parameters, and treat `Fn::If` branches, `Transform` sections, and `AWS::CloudFormation::Stack` children as unresolved. The report must carry the line **Source of changes: static diff (change set unavailable: <reason>)** and list every unresolved construct, because the additions list may be incomplete or overstated.
 
 ## Step 3: Cross-check against the live topology
+
+Full mode only. In worksheet mode, write `topology: not available in this runtime` once under the table and continue.
 
 If the Agent Space has topology or resource-discovery tools for the target account, use them for two questions only (Topology rule):
 
@@ -136,7 +149,7 @@ For every **Add**, and for every **Modify** whose changed properties include a s
 |---|---|---|---|
 | `AWS::EC2::Instance` | `InstanceType`, `Tenancy`, OS (from `ImageId` if known, else assume Linux and say so), `BlockDeviceMappings` volumes | instance hours, EBS GB-month | data transfer |
 | `AWS::AutoScaling::AutoScalingGroup` | `MinSize` or `DesiredCapacity` × launch template instance type | instance hours × count | — |
-| `AWS::RDS::DBInstance` | `DBInstanceClass`, `Engine`, `MultiAZ`, `AllocatedStorage`, `StorageType`, `Iops`, `LicenseModel` | instance hours, storage GB-month, provisioned IOPS | backup storage beyond free tier, I/O (Aurora) |
+| `AWS::RDS::DBInstance` | `DBInstanceClass`, `Engine`, `MultiAZ`, `AllocatedStorage`, `StorageType`, `Iops`, `LicenseModel`, `ManageMasterUserPassword` | instance hours, storage GB-month, provisioned IOPS; `ManageMasterUserPassword: true` creates an implicit AWS Secrets Manager secret (one secret-month, add a `<LogicalId> · master secret` row) | backup storage beyond free tier, I/O (Aurora), Secrets Manager API calls |
 | `AWS::RDS::DBCluster` + `AWS::RDS::DBInstance` (Aurora) | instance class × instance count, `Engine`, `ServerlessV2ScalingConfiguration` | instance hours, or ACU-hours between min and max for Serverless v2 | storage GB-month, I/O |
 | `AWS::EC2::NatGateway` | count | gateway hours | GB processed |
 | `AWS::ElasticLoadBalancingV2::LoadBalancer` | `Type` (application, network, gateway) | load balancer hours | LCU / NLCU hours |
@@ -150,11 +163,15 @@ For every **Add**, and for every **Modify** whose changed properties include a s
 | `AWS::EC2::EIP` | count | public IPv4 address hours | — |
 | `AWS::Lambda::Function`, `AWS::S3::Bucket`, `AWS::SQS::Queue`, `AWS::SNS::Topic`, `AWS::ApiGateway*`, `AWS::Logs::LogGroup`, `AWS::Events::Rule`, `AWS::StepFunctions::StateMachine`, IAM, Route 53 records | — | none | entirely usage-based |
 
+Some properties create resources that are not declared in the template. Treat these as their own fixed-cost rows, named after the declaring resource: `ManageMasterUserPassword: true` on an RDS instance or cluster creates a Secrets Manager secret; `AssociatePublicIpAddress: true` on an instance or launch template, and every NAT gateway and internet-facing load balancer, consume a billable public IPv4 address; `EnablePerformanceInsights` with `PerformanceInsightsRetentionPeriod` above 7 days is a paid tier.
+
 For a **Modify**, capture the old and new value of each sizing property so the delta can be priced (for example `db.r6g.large → db.r6g.xlarge`).
 
 When a sizing property is a `Ref` or `Fn::FindInMap`, resolve it with the parameters from Step 0. If it cannot be resolved, price nothing for that resource and report **not priced: sizing unresolved (<property>)**.
 
 ## Step 5: Resolve live rates
+
+Full mode only. In worksheet mode, skip to Step 5c.
 
 Follow `references/pricing-reference.md` exactly: it gives, per resource type, the Pricing API `ServiceCode`, the filter fields and values, how the target Region is scoped (a `regionCode` filter or a usagetype prefix), and the unit the rate is expressed in.
 
@@ -197,6 +214,36 @@ When a Step 5 lookup is unresolved after the `GetAttributeValues` retry, verify 
 
 If verify claims is not available in the Agent Space, say so once in the Verification line and mark every row unverified; do not stop the preview. Verify claims reads documentation; it never replaces the change set as the source of *what* changes, and never replaces the Price List API as the source of *how much*.
 
+### Step 5c: Emit the pricing worksheet (worksheet mode)
+
+When no AWS tool is available, the deliverable is everything a priced run needs except the rates. After the table, print one JSON block:
+
+```json
+{
+  "iac_change_cost_preview_worksheet": "1",
+  "source": "<repo> PR #<n> <base>..<head>",
+  "stack": "<STACK_NAME>", "account": "<ACCOUNT_ID or unknown>", "region": "<REGION>",
+  "changes_from": "static diff",
+  "hours_per_month": 730,
+  "rows": [
+    {"resource": "LedgerDb", "type": "AWS::RDS::DBInstance", "change": "Add",
+     "service_code": "AmazonRDS", "filters": {"regionCode": "eu-west-1", "instanceType": "db.r6g.large", "databaseEngine": "PostgreSQL", "deploymentOption": "Multi-AZ", "licenseModel": "No license required"},
+     "quantity": 1, "unit": "Hrs", "formula": "rate * 730 * quantity"},
+    {"resource": "LedgerDb · storage", "type": "AWS::RDS::DBInstance", "change": "Add",
+     "service_code": "AmazonRDS", "filters": {"regionCode": "eu-west-1", "productFamily": "Database Storage", "volumeType": "General Purpose-GP3", "deploymentOption": "Multi-AZ"},
+     "quantity": 200, "unit": "GB-Mo", "formula": "rate * quantity"},
+    {"resource": "LedgerIndex", "type": "AWS::DynamoDB::Table", "change": "Modify",
+     "service_code": "AmazonDynamoDB", "filters": {"usagetype": "EU-ReadCapacityUnit-Hrs"}, "quantity": 50, "unit": "ReadCapacityUnit-Hrs", "formula": "rate * 730 * quantity", "old_quantity": 0}
+  ],
+  "usage_based": [{"resource": "EventsArchive", "type": "AWS::S3::Bucket"}],
+  "assumptions": ["parameters defaulted: DbSubnetIds, NatPublicSubnetId", "account not provided"]
+}
+```
+
+One entry per fixed price dimension, filters exactly as `references/pricing-reference.md` specifies them (already Region-scoped), quantity and unit filled in, formula stated. A later run in full mode takes this block as its input: it resolves each `service_code` + `filters` with `pricing:GetProducts`, applies the formula, verifies the model (Step 5b), and prints the priced table. Nothing in Steps 1 to 4 is repeated.
+
+If the repository has a rate snapshot that satisfies the Rate snapshot rule, fill Monthly cost from it in the same run, mark those rows ⏱, and still print the worksheet so a live run can replace the snapshot figures.
+
 ## Step 6: Compute the monthly delta
 
 For each change set entry:
@@ -224,7 +271,9 @@ The report is one table and a total. It is written in Markdown so it renders in 
 ```markdown
 ### IaC change cost preview: <repo> PR #<n> · stack `<STACK_NAME>` · <ACCOUNT_ID> · <REGION>
 
-Changes from change set `<id>` (deleted after preview) · rates: live AWS Price List, <timestamp> UTC · 730 h/month
+Mode: full · changes from change set `<id>` (deleted after preview) · rates: live AWS Price List, <timestamp> UTC · 730 h/month
+| Mode: worksheet (no AWS tool in this runtime) · changes from static diff · rates: pending, see worksheet below · 730 h/month
+| Mode: worksheet · changes from static diff · rates: snapshot cost-preview/rates.eu-west-1.json, generated <date> (not live) · 730 h/month
 
 | Resource | Type | Change | Sizing | Live rate | Monthly cost |
 |---|---|---|---|---|---:|
@@ -248,7 +297,8 @@ Not priced: <LogicalId> (rate unavailable: <ServiceCode>, <field>=<value>, <Regi
 Rules for the table:
 
 - **Change** is `Add`, `Modify`, `Remove`, or `Replace` (a Modify with `Replacement: True`). A `Remove` row shows a negative monthly cost. A `Modify` row shows the delta with a sign and the old → new sizing.
-- **Monthly cost** is a dollar figure only for fixed charges (Fixed versus usage-based rule). Usage-based resources show `usage-based` in that column and their unit rate in **Live rate**; if the user supplied a volume, show the computed figure with the assumption in **Sizing** (for example `2 TB/month assumed`) and keep it out of the fixed total. Resources with no charge show `no charge`. Unresolved rates show `not priced`, never `$0.00`.
+- **Monthly cost** is a dollar figure only for fixed charges (Fixed versus usage-based rule). Usage-based resources show `usage-based` in that column and their unit rate in **Live rate**; if the user supplied a volume, show the computed figure with the assumption in **Sizing** (for example `2 TB/month assumed`) and keep it out of the fixed total. Resources with no charge show `no charge`. A lookup that was attempted and failed shows `not priced`; a lookup that could not be attempted (worksheet mode) shows `pending`. Never `$0.00` for either. In worksheet mode the total row reads `pending (n rows)` or, with a snapshot, the snapshot total marked ⏱.
+- In worksheet mode the **Live rate** column is headed **Price dimension** and holds the ServiceCode and key filter instead of a rate, so the reviewer can see what will be priced.
 - **Live rate** is the resolved `pricePerUnit.USD` and unit, followed by its billing-model marker from Step 5b (✓ verified, ⚠ mismatch, — unverified). The full price dimension (ServiceCode, filter field and value) goes in the **Rate sources** line under the table so every figure stays traceable without widening the table.
 - The **Verification** line is always present. It states how many rows verify claims checked against the documentation, the legend for the markers, and the reason for every ⚠ and —, or that the skill was not available.
 - Sort rows by monthly cost, largest first, then usage-based, then no-charge and not-priced rows. The **Total fixed monthly estimate** row is always last and sums only the dollar figures above it.
@@ -259,7 +309,9 @@ Rules for the table:
 
 Check every item. Fix the report if any fails.
 
-- [ ] The source of changes is stated: change set ID, or static diff with the reason.
+- [ ] The mode is stated in the header, and the source of changes: change set ID, or static diff with the reason.
+- [ ] In worksheet mode, the pricing worksheet is present, has one entry per fixed price dimension, and every entry has Region-scoped filters, a quantity, a unit, and a formula.
+- [ ] Any ⏱ figure comes from a snapshot whose Region matches and whose `generated_at` is within 30 days, and the header names the file and date.
 - [ ] Every dollar figure in the table traces to a change set entry (or static diff entry) and to a price dimension named in the Rate sources line with ServiceCode, filter field and value, and unit.
 - [ ] No rate was hardcoded, recalled, or reused from a previous preview.
 - [ ] Every fixed-cost row carries a billing-model marker, every ⚠ and — has its reason in the Verification line, and every ⚠ had its formula and filters re-checked against the documentation before reporting.
@@ -287,6 +339,7 @@ This skill ships with no account, Region, stack, repository, or rate values. Res
 ## Limitations
 
 - CloudFormation, SAM, and CDK-synthesized templates only. Terraform, Pulumi, and unsynthesized CDK source are reported as out of scope.
+- Inside a release readiness review there is no AWS tool, so the review comment contains the analysis and the pricing worksheet, not live figures. Live figures need a follow-up run with `use_aws` (paste the worksheet), or a rate snapshot in the repository.
 - Usage-based charges are never estimated without a user-supplied volume. The preview is a floor for fixed charges, not a total bill.
 - A static diff cannot resolve Conditions, `Fn::If`, Transforms, or nested stacks; when the change set path is unavailable the additions list may be incomplete or overstated, and the report says so.
 - Savings Plans, Reserved Instances, private pricing, and free tier are not applied; every rate is public On-Demand.
