@@ -14,7 +14,7 @@ Autonomous agents and CI pipelines can tell you whether a template is valid and 
 - **Topology cross-check.** For each addition, looks for a matching live resource outside the stack and flags possible duplicates. For each removal or replacement, lists the live resources that depend on it.
 - **Live, per-Region pricing.** Every rate is a `pricing:GetProducts` lookup for the stack's Region on this run. No rate ships with the skill. Unresolved rates are reported as *not priced*, never as `$0.00`.
 - **Fixed versus usage-based discipline.** Instance hours, node hours, gateway hours, load balancer hours, provisioned capacity, storage, keys, and secrets are estimated. Requests, bytes, and invocations are named with their unit rate and excluded from the total unless the user supplies a volume.
-- **Fixed report layout.** Added, Modified, Removed, Usage-based, Not priced, Totals, Assumptions, Limitations. Readable in chat and in a pull request comment.
+- **One table, one total.** A row per resource with its change (Add, Modify, Remove, Replace), sizing, live rate, and monthly cost, then a total fixed monthly estimate. Markdown, so it renders in chat and in a pull request comment.
 - **Read-mostly.** The only write is the change set, which never touches a resource and is deleted when the preview is done.
 
 ## Prerequisites

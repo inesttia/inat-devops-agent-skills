@@ -14,7 +14,7 @@ metadata:
 
 This skill answers one question for an infrastructure change that has not been deployed yet: **what will this add to the account, and what will it cost per month?**
 
-It works on CloudFormation templates (including SAM templates and CDK-synthesized output) coming from a pull request, a branch, a commit, or pasted directly into the conversation. It produces a fixed-layout preview listing every resource that will be created, modified, or removed, the sizing properties that drive its cost, a live per-Region rate for each fixed-cost resource, and a monthly total. Usage-based charges are named, not guessed.
+It works on CloudFormation templates (including SAM templates and CDK-synthesized output) coming from a pull request, a branch, a commit, or pasted directly into the conversation. It produces one table with a row per resource that will be created, modified, or removed, showing the sizing that drives its cost, the live per-Region rate, and its monthly cost, followed by a total fixed monthly estimate. Usage-based charges are named, not guessed.
 
 The skill is read-mostly. Its only write operation is creating a CloudFormation change set, which does not touch any resource and is deleted when the preview is done.
 
@@ -186,69 +186,51 @@ If the user supplied volume assumptions for usage-based lines, show them as a se
 
 ## Step 7: Report
 
-Use this layout. It is meant to be readable in a pull request comment and in chat.
+The report is one table and a total. It is written in Markdown so it renders in chat and in a pull request comment. Every resource the change set (or static diff) touches gets a row; a resource with more than one fixed price dimension (for example instance hours and storage) gets one row per dimension, with the dimension named after the logical ID.
 
-```text
-IaC CHANGE COST PREVIEW
-Source:     <repo> PR #<n> (<base>…<head>)  ·  stack <STACK_NAME>  ·  <ACCOUNT_ID>  ·  <REGION>
-Changes:    change set <arn or id> (CREATE_COMPLETE, deleted after preview)
-            | static diff (change set unavailable: <reason>)
-Rates:      live AWS Price List lookups at <timestamp UTC> · 730 h/month · target Region <REGION>
+```markdown
+### IaC change cost preview: <repo> PR #<n> · stack `<STACK_NAME>` · <ACCOUNT_ID> · <REGION>
 
-ADDED (n)
-  <LogicalId>  <ResourceType>
-    sizing:   <InstanceType> · <Engine> · Multi-AZ · 200 GB gp3
-    rate:     AmazonRDS instanceType=db.r6g.large databaseEngine=PostgreSQL deploymentOption=Multi-AZ → $x.xxxx/Hrs
-              AmazonRDS usagetype=<PREFIX>-RDS:Multi-AZ-GP3-Storage → $x.xx/GB-Mo
-    monthly:  $xxx.xx
-    topology: possible duplicate of <physical id> (not in stack) | no match in account
-  ...
+Changes from change set `<id>` (deleted after preview) · rates: live AWS Price List, <timestamp> UTC · 730 h/month
 
-MODIFIED (n)
-  <LogicalId>  <ResourceType>  Replacement: <True|False|Conditional>
-    change:   DBInstanceClass db.r6g.large → db.r6g.xlarge
-    monthly:  +$xxx.xx
-    depends:  <dependents from topology, if Replacement is True>
+| Resource | Type | Change | Sizing | Live rate | Monthly cost |
+|---|---|---|---|---|---:|
+| LedgerDb | AWS::RDS::DBInstance | Add | db.r6g.large · PostgreSQL 16 · Multi-AZ | $x.xxxx / Hrs | $xxx.xx |
+| LedgerDb · storage | | | 200 GB gp3 · Multi-AZ | $x.xxx / GB-Mo | $xx.xx |
+| ReconcilerNatGateway | AWS::EC2::NatGateway | Add | 1 gateway (data processed usage-based) | $x.xxx / Hrs | $xx.xx |
+| ReconcilerNatEip | AWS::EC2::EIP | Add | 1 public IPv4 | $x.xxx / Hrs | $x.xx |
+| LedgerKey | AWS::KMS::Key | Add | 1 key | $x.xx / key-month | $x.xx |
+| LedgerIndex | AWS::DynamoDB::Table | Modify | on-demand → 50 RCU / 25 WCU | $x.xxxxx / RCU-Hr · $x.xxxxx / WCU-Hr | +$xx.xx |
+| EventsArchive | AWS::S3::Bucket | Add | — | $x.xxx / GB-Mo · $x.xxx / 1K requests | usage-based |
+| ReconcilerLogs | AWS::Logs::LogGroup | Add | 30-day retention | $x.xx / GB ingested | usage-based |
+| LedgerDbSubnetGroup | AWS::RDS::DBSubnetGroup | Add | — | — | no charge |
+| **Total fixed monthly estimate** | | | | | **+$x,xxx.xx** |
 
-REMOVED (n)
-  <LogicalId>  <ResourceType>
-    monthly:  −$xxx.xx
-    depends:  <dependents from topology>
-
-USAGE-BASED, NOT ESTIMATED (n)
-  <LogicalId>  <ResourceType>  <price dimension> $x.xx per <unit>
-
-NOT PRICED (n)
-  <LogicalId>  <ResourceType>  rate unavailable | sizing unresolved (<property>)
-
-TOTALS (fixed charges)
-  Added        +$x,xxx.xx
-  Resized      +$xxx.xx
-  Removed      −$xxx.xx
-  Net          +$x,xxx.xx / month
-
-ASSUMPTIONS
-  - Parameters defaulted: <list> | all parameters supplied
-  - OS assumed Linux for <LogicalId> (ImageId not resolvable)
-  - <user-supplied volume assumptions, if any>
-
-LIMITATIONS OF THIS PREVIEW
-  - <static diff caveats, unresolved constructs, topology tools unavailable, out-of-scope files>
+Rate sources: LedgerDb → AmazonRDS instanceType=db.r6g.large, databaseEngine=PostgreSQL, deploymentOption=Multi-AZ (Hrs); LedgerDb · storage → AmazonRDS usagetype=EU-RDS:Multi-AZ-GP3-Storage (GB-Mo); …
+Assumptions: parameters defaulted: DbSubnetIds, NatPublicSubnetId · OS assumed Linux for <LogicalId>
+Not priced: <LogicalId> (rate unavailable: <ServiceCode>, <field>=<value>, <Region>)
 ```
 
-Omit an empty section rather than printing `(0)`. Keep resource lines sorted by monthly figure, largest first.
+Rules for the table:
+
+- **Change** is `Add`, `Modify`, `Remove`, or `Replace` (a Modify with `Replacement: True`). A `Remove` row shows a negative monthly cost. A `Modify` row shows the delta with a sign and the old → new sizing.
+- **Monthly cost** is a dollar figure only for fixed charges (Fixed versus usage-based rule). Usage-based resources show `usage-based` in that column and their unit rate in **Live rate**; if the user supplied a volume, show the computed figure with the assumption in **Sizing** (for example `2 TB/month assumed`) and keep it out of the fixed total. Resources with no charge show `no charge`. Unresolved rates show `not priced`, never `$0.00`.
+- **Live rate** is the resolved `pricePerUnit.USD` and unit. The full price dimension (ServiceCode, filter field and value) goes in the **Rate sources** line under the table so every figure stays traceable without widening the table.
+- Sort rows by monthly cost, largest first, then usage-based, then no-charge and not-priced rows. The **Total fixed monthly estimate** row is always last and sums only the dollar figures above it.
+- Add a **Topology** line under the table only when there is something to say: `possible duplicate of <physical id> (not in stack)` for an Add, or `dependents: <list>` for a Remove or Replace.
+- If the change set could not be created, the header line reads `Changes from static diff (change set unavailable: <reason>)` and a **Limitations** line lists the unresolved constructs.
 
 ## Step 8: Validate before reporting
 
 Check every item. Fix the report if any fails.
 
 - [ ] The source of changes is stated: change set ID, or static diff with the reason.
-- [ ] Every figure in ADDED, MODIFIED, and REMOVED traces to a change set entry (or static diff entry) and a named price dimension with ServiceCode, filter field and value, and unit.
+- [ ] Every dollar figure in the table traces to a change set entry (or static diff entry) and to a price dimension named in the Rate sources line with ServiceCode, filter field and value, and unit.
 - [ ] No rate was hardcoded, recalled, or reused from a previous preview.
-- [ ] No usage-based charge is inside the fixed totals without a stated assumption.
-- [ ] No `$0.00` appears for an unresolved rate; those lines are under NOT PRICED.
+- [ ] No usage-based charge is inside the total row without a stated assumption in its Sizing cell.
+- [ ] No `$0.00` appears for an unresolved rate; those rows say `not priced` and the Not priced line gives the reason.
 - [ ] The target Region is the stack's Region, not the Agent Space Region, and it appears in the header.
-- [ ] Every parameter that was defaulted is listed under ASSUMPTIONS.
+- [ ] Every parameter that was defaulted is listed in the Assumptions line.
 - [ ] The change set has been deleted (and the placeholder stack, for CREATE type).
 - [ ] Nothing was deployed or modified.
 
@@ -261,9 +243,9 @@ This skill ships with no account, Region, stack, repository, or rate values. Res
 | Change source | Repository integration tools in the Agent Space, or content pasted by the user | Base and head template bodies are in hand |
 | Target account and Region | Pipeline configuration or the user; Region rule | Both appear in the report header |
 | Stack name | Pipeline configuration or the user; `DescribeStacks` confirms existence | Change set type (CREATE or UPDATE) is decided |
-| Parameters | Pipeline configuration; template defaults otherwise | Defaulted parameters are listed under ASSUMPTIONS |
+| Parameters | Pipeline configuration; template defaults otherwise | Defaulted parameters are listed in the Assumptions line |
 | Rates | Live Price List lookups per `references/pricing-reference.md` | Each figure names its price dimension |
-| Topology | Resource-discovery tools in the Agent Space, if present | Duplicate and dependency lines appear, or the report says topology was unavailable |
+| Topology | Resource-discovery tools in the Agent Space, if present | A Topology line appears when there is a duplicate or dependency to report, or the report says topology was unavailable |
 
 ## Limitations
 
