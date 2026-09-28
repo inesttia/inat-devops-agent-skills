@@ -4,6 +4,6 @@ Deployment configuration used by the pipeline. The `iac-change-cost-preview` ski
 
 | Template | Stack name | Target Region | Parameters |
 |---|---|---|---|
-| `payments-ledger.yaml` | `payments-ledger` | `eu-west-1` | `Environment=prod` |
+| `payments-ledger.yaml` | `payments-ledger` | `eu-west-1` | `Environment=prod`, `DbInstanceClass=db.r6g.large`, `DbAllocatedStorageGb=200` (subnet parameters use template defaults) |
 
 The stack is not deployed yet; a preview of this template is a `CREATE` change set.
