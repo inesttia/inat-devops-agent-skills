@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "IaC cost preview on template save",
+      "trigger": "PostFileSave",
+      "description": "After the agent edits a CloudFormation template, run the cost preview script and report the live monthly cost delta.",
+      "matcher": "cloudformation/.*\\.(ya?ml|json)$",
+      "action": {
+        "type": "agent",
+        "prompt": "A CloudFormation template under cloudformation/ was just saved. Apply the iac-change-cost-preview skill now. Work in the git repository that contains the saved template (for example ~/Documents/inat-devops-agent-skills): resolve stack, account, Region and parameters from its cloudformation/README.md, then run `python3 .kiro/skills/iac-change-cost-preview/scripts/cost_preview.py --template <saved file> --base origin/main --region <REGION> --stack <STACK> --account <ACCOUNT>` from that repository root (the same script is also at ~/.kiro/skills/iac-change-cost-preview/scripts/cost_preview.py). Show the table and monthly total exactly as printed. If the mode line says worksheet because the Price List API was unreachable, say which AWS credentials need refreshing instead of estimating any figure."
+      }
+    }
+  ]
+}
