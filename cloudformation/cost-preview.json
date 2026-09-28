@@ -1,0 +1,18 @@
+{
+  "templates": {
+    "cloudformation/payments-ledger.yaml": {
+      "stack": "payments-ledger",
+      "region": "eu-west-1",
+      "account": "<ACCOUNT_ID>",
+      "params": {
+        "Environment": "prod",
+        "DbInstanceClass": "db.r6g.large",
+        "DbAllocatedStorageGb": "200",
+        "WorkerInstanceType": "m6g.large",
+        "WorkerDesiredCapacity": "2",
+        "CacheNodeType": "cache.r6g.large"
+      }
+    }
+  },
+  "max_monthly_delta_usd": null
+}

@@ -1,0 +1,57 @@
+{
+  "name": "iac-cost-lens",
+  "displayName": "IaC Cost Lens",
+  "description": "Live monthly cost above every CloudFormation resource, priced with the AWS Price List API as you type.",
+  "version": "0.1.0",
+  "publisher": "inesttia",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onLanguage:yaml", "onLanguage:json"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "iacCostLens.refresh", "title": "IaC Cost Lens: Refresh estimate" },
+      { "command": "iacCostLens.showTable", "title": "IaC Cost Lens: Show cost table" },
+      { "command": "iacCostLens.toggle", "title": "IaC Cost Lens: Enable/disable" }
+    ],
+    "configuration": {
+      "title": "IaC Cost Lens",
+      "properties": {
+        "iacCostLens.enabled": { "type": "boolean", "default": true },
+        "iacCostLens.pythonPath": { "type": "string", "default": "python3" },
+        "iacCostLens.scriptPath": {
+          "type": "string",
+          "default": ".kiro/skills/iac-change-cost-preview/scripts/cost_preview.py",
+          "description": "Path to cost_preview.py, relative to the workspace folder that contains the template."
+        },
+        "iacCostLens.configPath": {
+          "type": "string",
+          "default": "cloudformation/cost-preview.json",
+          "description": "Per-template stack, account, Region and parameters."
+        },
+        "iacCostLens.baseRef": {
+          "type": "string",
+          "default": "origin/main",
+          "description": "Git ref the working copy is compared against for Add / Modify / Remove."
+        },
+        "iacCostLens.filePattern": {
+          "type": "string",
+          "default": "**/cloudformation/**/*.{yaml,yml,json}",
+          "description": "Glob for the templates to decorate."
+        },
+        "iacCostLens.debounceMs": { "type": "number", "default": 1500 },
+        "iacCostLens.awsProfile": { "type": "string", "default": "", "description": "AWS profile for pricing:GetProducts (empty = default credential chain)." }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "20.x",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

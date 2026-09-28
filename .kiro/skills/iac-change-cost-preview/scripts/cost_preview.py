@@ -460,7 +460,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--template", required=True, help="path to the template in the working tree")
     ap.add_argument("--base", default="origin/main", help="git ref for the base version (default origin/main)")
-    ap.add_argument("--region", required=True, help="target Region the stack deploys to")
+    ap.add_argument("--head", default=None, help="git ref for the head version (default: working tree)")
+    ap.add_argument("--head-file", default=None, help="read the head template from this file instead (for unsaved editor buffers)")
+    ap.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    ap.add_argument("--config", default="cloudformation/cost-preview.json",
+                    help="JSON with per-template stack/account/region/params (used when flags are not given)")
+    ap.add_argument("--region", default=None, help="target Region the stack deploys to (or from --config)")
+    ap.add_argument("--max-monthly-delta", type=float, default=None,
+                    help="exit 2 if the fixed monthly delta exceeds this many USD (or from --config)")
     ap.add_argument("--account", default="unknown")
     ap.add_argument("--stack", default="")
     ap.add_argument("--profile", default=None, help="AWS profile for the Price List API")
@@ -470,8 +477,30 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
-    overrides = dict(kv.split("=", 1) for kv in a.param)
-    head = load_template(open(a.template, encoding="utf-8").read())
+    # per-template defaults from the config file
+    cfg: dict = {}
+    try:
+        cfg = json.load(open(a.config, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    tcfg = (cfg.get("templates") or {}).get(a.template, {})
+    a.region = a.region or tcfg.get("region")
+    a.stack = a.stack or tcfg.get("stack", "")
+    a.account = a.account if a.account != "unknown" else str(tcfg.get("account", "unknown"))
+    if a.max_monthly_delta is None and cfg.get("max_monthly_delta_usd") is not None:
+        a.max_monthly_delta = float(cfg["max_monthly_delta_usd"])
+    if not a.region:
+        raise SystemExit("--region is required (or add the template to cloudformation/cost-preview.json)")
+
+    overrides = {**{k: str(v) for k, v in (tcfg.get("params") or {}).items()},
+                 **dict(kv.split("=", 1) for kv in a.param)}
+    if a.head_file:
+        head_text = open(a.head_file, encoding="utf-8").read()
+    elif a.head:
+        head_text = git_show(a.head, a.template)
+    else:
+        head_text = open(a.template, encoding="utf-8").read()
+    head = load_template(head_text)
     base = load_template(git_show(a.base, a.template))
     hp, bp = param_values(head, overrides), param_values(base, overrides)
     hres, bres = head.get("Resources") or {}, base.get("Resources") or {}
@@ -523,7 +552,7 @@ def main() -> int:
 
     when = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     base_exists = bool(bres)
-    changes = f"static diff `{a.base}` → working tree" + ("" if base_exists else " (template new at base: every resource is an Add)")
+    changes = f"static diff `{a.base}` → `{a.head or 'working tree'}`" + ("" if base_exists else " (template new at base: every resource is an Add)")
     stack = f"stack `{a.stack}` · " if a.stack else ""
     if live:
         mode = f"Mode: full · {changes} · rates: live AWS Price List, {when} · {HOURS} h/month"
@@ -531,10 +560,11 @@ def main() -> int:
         why = "--no-pricing" if a.no_pricing else f"no AWS credentials for the Price List API ({pricer.error})"
         mode = f"Mode: worksheet ({why}) · {changes} · rates: pending · {HOURS} h/month"
 
-    print(f"### IaC change cost preview: `{a.template}` · {stack}account {a.account} · {a.region}\n")
-    print(mode + "\n")
-    print("| Resource | Type | Change | Sizing | Rate | Monthly cost |")
-    print("|---|---|---|---|---|---:|")
+    if a.format == "markdown":
+        print(f"### IaC change cost preview: `{a.template}` · {stack}account {a.account} · {a.region}\n")
+        print(mode + "\n")
+        print("| Resource | Type | Change | Sizing | Rate | Monthly cost |")
+        print("|---|---|---|---|---|---:|")
 
     def cost_cell(d: Dim, old: Dim | None, change: str) -> tuple[str, float | None]:
         if not live:
@@ -552,6 +582,7 @@ def main() -> int:
 
     total, pending, unpriced = 0.0, 0, 0
     table = []
+    jrows = []
     for change, d, old in rows:
         cell, val = cost_cell(d, old, change)
         if val is not None:
@@ -564,6 +595,21 @@ def main() -> int:
         rate = f"${d.rate:,.5f} / {d.unit}" if d.rate is not None else f"{d.service} · {hint}"
         sizing = d.sizing if change != "Modify" or old is None else f"{old.sizing} → {d.sizing}"
         table.append((val if val is not None else -1e18, f"| {d.row} | `{d.rtype}` | {change} | {sizing} | {rate} | {cell} |"))
+        jrows.append({"row": d.row, "logical_id": d.row.split(" · ")[0], "type": d.rtype, "change": change, "sizing": sizing,
+                      "service_code": d.service, "filters": d.filters, "rate": d.rate, "unit": d.unit, "quantity": d.qty,
+                      "status": ("pending" if not live else d.status), "note": d.note, "monthly": val, "cell": cell})
+    if a.format == "json":
+        out = {"template": a.template, "stack": a.stack, "account": a.account, "region": a.region, "base": a.base,
+               "head": a.head_file or a.head or "working-tree", "mode": "full" if live else "worksheet",
+               "mode_reason": "" if live else ("--no-pricing" if a.no_pricing else pricer.error), "generated_at": when,
+               "hours_per_month": HOURS, "rows": jrows,
+               "usage_based": [{"logical_id": lid, "type": t, "change": "Add", "dimensions": u} for lid, t, u in add_usage]
+                              + [{"logical_id": lid, "type": t, "change": "Modify", "dimensions": u} for lid, t, u in mod_usage],
+               "no_charge": [{"logical_id": lid, "type": t} for lid, t, _ in add_free],
+               "total_fixed_monthly": total if live else None, "pending_rows": pending, "unpriced_rows": unpriced,
+               "max_monthly_delta": a.max_monthly_delta}
+        print(json.dumps(out, indent=2, default=str))
+        return 2 if (live and a.max_monthly_delta is not None and total > a.max_monthly_delta) else 0
     for _, line in sorted(table, key=lambda x: -x[0]):
         print(line)
     for lid, t, u in add_usage:
@@ -587,7 +633,7 @@ def main() -> int:
           f"account {a.account} · change classification is static (no change set); Replacement not evaluated\n")
 
     if a.worksheet or not live:
-        ws = {"iac_change_cost_preview_worksheet": "1", "source": f"{a.template} {a.base}..working-tree",
+        ws = {"iac_change_cost_preview_worksheet": "1", "source": f"{a.template} {a.base}..{a.head or 'working-tree'}",
               "stack": a.stack or None, "account": a.account, "region": a.region, "changes_from": "static diff",
               "hours_per_month": HOURS,
               "rows": [{"resource": d.row, "type": d.rtype, "change": c, "service_code": d.service, "filters": d.filters,
@@ -596,6 +642,10 @@ def main() -> int:
               "usage_based": [{"resource": lid, "type": t, "dimensions": u} for lid, t, u in add_usage + mod_usage],
               "assumptions": [f"parameters defaulted: {', '.join(defaulted) or 'none'}", f"account {a.account}"]}
         print("Pricing worksheet:\n\n```json\n" + json.dumps(ws, indent=2) + "\n```")
+    if live and a.max_monthly_delta is not None and total > a.max_monthly_delta:
+        print(f"\n⛔ Fixed monthly delta {fmt_money(total, True)} exceeds the configured limit of {fmt_money(a.max_monthly_delta)}.",
+              file=sys.stderr)
+        return 2
     return 0
 
 

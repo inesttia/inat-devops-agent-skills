@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# pre-push: preview the monthly cost of every CloudFormation template this push changes.
+#
+# Installed with:  git config core.hooksPath .githooks   (see scripts/install-hooks.sh)
+# Runs .kiro/skills/iac-change-cost-preview/scripts/cost_preview.py for each changed
+# template under cloudformation/, pricing it live with the AWS Price List API.
+#
+# Exit codes: 0 = push continues (preview is informational)
+#             2 = push blocked because the fixed monthly delta exceeds
+#                 max_monthly_delta_usd in cloudformation/cost-preview.json
+#
+# Skip once with:  COST_PREVIEW_SKIP=1 git push
+set -u
+
+[ -n "${COST_PREVIEW_SKIP:-}" ] && exit 0
+
+repo_root=$(git rev-parse --show-toplevel) || exit 0
+cd "$repo_root" || exit 0
+script=".kiro/skills/iac-change-cost-preview/scripts/cost_preview.py"
+[ -f "$script" ] || exit 0
+
+zero=0000000000000000000000000000000000000000
+default_base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
+blocked=0
+ran=0
+
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref being pushed
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue            # branch deletion: nothing to preview
+  if [ "$remote_sha" = "$zero" ]; then
+    base="$default_base"                             # new branch: compare with the default branch
+    git rev-parse -q --verify "$base" >/dev/null 2>&1 || base=$(git rev-parse -q --verify main 2>/dev/null || echo "")
+  else
+    base="$remote_sha"                               # existing branch: compare with what the remote has
+  fi
+  [ -z "$base" ] && continue
+
+  templates=$(git diff --name-only "$base" "$local_sha" -- 'cloudformation/*.yaml' 'cloudformation/*.yml' 'cloudformation/*.json' 2>/dev/null \
+              | grep -v -E '(^|/)cost-preview\.json$' || true)
+  [ -z "$templates" ] && continue
+
+  for t in $templates; do
+    # template removed in this push: nothing at head to price
+    git cat-file -e "$local_sha:$t" 2>/dev/null || continue
+    ran=1
+    echo
+    echo "── IaC cost preview · $t · $(echo "$base" | cut -c1-12) → $(echo "$local_sha" | cut -c1-12) ──"
+    python3 "$script" --template "$t" --base "$base" --head "$local_sha"
+    rc=$?
+    if [ $rc -eq 2 ]; then
+      blocked=1
+    elif [ $rc -ne 0 ]; then
+      echo "cost preview failed (exit $rc); push continues" >&2
+    fi
+  done
+done
+
+if [ $blocked -eq 1 ]; then
+  echo
+  echo "Push blocked by the IaC cost preview. Raise max_monthly_delta_usd in cloudformation/cost-preview.json," >&2
+  echo "reduce the change, or bypass once with COST_PREVIEW_SKIP=1 git push." >&2
+  exit 2
+fi
+[ $ran -eq 1 ] && echo && echo "Cost preview done; pushing."
+exit 0
