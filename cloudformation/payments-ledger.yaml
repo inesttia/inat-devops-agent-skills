@@ -1,9 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  payments-ledger: event archive, lookup table, relational ledger, and
-  alerting for the payments service. This version adds a Multi-AZ PostgreSQL
-  ledger database, a customer-managed KMS key, a NAT gateway for the
-  reconciler's egress, and moves the index table to provisioned capacity.
+  payments-ledger: event archive, lookup table, relational ledger, worker
+  fleet, cache, and alerting for the payments service. This version adds a
+  Multi-AZ PostgreSQL ledger database, a customer-managed KMS key, a NAT
+  gateway, an internet-facing load balancer, an Auto Scaling group of
+  Graviton workers, a Redis replication group, the reconciler function and
+  its queue, a reports bucket and an access-logs bucket with server access
+  logging on the event archive, two alarms, and moves the index table to
+  provisioned capacity.
 
 Parameters:
   Environment:
@@ -27,6 +31,26 @@ Parameters:
     Type: String
     Default: subnet-0a1b2c3d4e5f60010
     Description: Public subnet that hosts the NAT gateway.
+  VpcId:
+    Type: String
+    Default: vpc-0a1b2c3d4e5f60000
+    Description: VPC for the load balancer, workers, and cache.
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Default: subnet-0a1b2c3d4e5f60010,subnet-0a1b2c3d4e5f60011
+    Description: Public subnets for the load balancer (one public IPv4 each).
+  WorkerInstanceType:
+    Type: String
+    Default: m6g.large
+    Description: Instance type for the payments worker fleet.
+  WorkerDesiredCapacity:
+    Type: Number
+    Default: 2
+    Description: Number of worker instances the Auto Scaling group keeps running.
+  CacheNodeType:
+    Type: String
+    Default: cache.r6g.large
+    Description: Node type for the session cache replication group.
 
 Resources:
   EventsArchive:
@@ -49,6 +73,86 @@ Resources:
           - Id: ExpireOldEvents
             Status: Enabled
             ExpirationInDays: 365
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: events-archive/
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub payments-access-logs-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${AccessLogsBucket.Arn}/events-archive/*
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  ReconcilerReports:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub payments-reconciler-reports-${Environment}-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref LedgerKey
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TierAndExpireReports
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+            ExpirationInDays: 730
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -177,6 +281,285 @@ Resources:
       LogGroupName: !Sub /aws/lambda/payments-reconciler-${Environment}
       RetentionInDays: 30
 
+  # ---------------------------------------------------------------- network
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Payments API load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Payments workers, reachable from the load balancer only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Session cache, reachable from the workers only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref WorkerSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------- load balancer
+  ApiLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub payments-api-${Environment}
+      Type: application
+      Scheme: internet-facing
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: 'true'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub payments-api-${Environment}
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      HealthCheckPath: /health
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApiListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApiLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  # ------------------------------------------------------------ worker fleet
+  WorkerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub payments-worker-${Environment}
+      LaunchTemplateData:
+        ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+        InstanceType: !Ref WorkerInstanceType
+        SecurityGroupIds:
+          - !Ref WorkerSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 50
+              Encrypted: true
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpTokens: required
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub payments-worker-${Environment}
+              - Key: Environment
+                Value: !Ref Environment
+
+  WorkerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub payments-worker-${Environment}
+      MinSize: '2'
+      MaxSize: '6'
+      DesiredCapacity: !Ref WorkerDesiredCapacity
+      VPCZoneIdentifier: !Ref DbSubnetIds
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WorkerLaunchTemplate
+        Version: !GetAtt WorkerLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref ApiTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
+        - Key: Service
+          Value: payments
+          PropagateAtLaunch: true
+
+  # ---------------------------------------------------------------- cache
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: !Sub Private subnets for the payments session cache (${Environment})
+      SubnetIds: !Ref DbSubnetIds
+
+  SessionCache:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Sub payments-session-${Environment}
+      ReplicationGroupDescription: Payments session cache
+      Engine: redis
+      EngineVersion: '7.1'
+      CacheNodeType: !Ref CacheNodeType
+      NumNodeGroups: 1
+      ReplicasPerNodeGroup: 1
+      AutomaticFailoverEnabled: true
+      MultiAZEnabled: true
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds:
+        - !Ref CacheSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
+  # ------------------------------------------------------------- reconciler
+  ReconcilerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub payments-reconciler-${Environment}
+      VisibilityTimeout: 300
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ReconcilerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: reconciler
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ReconcilerQueue.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt LedgerIndex.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub ${ReconcilerReports.Arn}/*
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                Resource: !GetAtt LedgerKey.Arn
+
+  ReconcilerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub payments-reconciler-${Environment}
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: index.handler
+      MemorySize: 512
+      Timeout: 60
+      Role: !GetAtt ReconcilerRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref ReconcilerLogs
+      Environment:
+        Variables:
+          LEDGER_TABLE: !Ref LedgerIndex
+          REPORTS_BUCKET: !Ref ReconcilerReports
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"reconciled": len(event.get("Records", []))}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ReconcilerEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ReconcilerQueue.Arn
+      FunctionName: !Ref ReconcilerFunction
+      BatchSize: 10
+
+  # ----------------------------------------------------------------- alarms
+  ReconcilerQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub payments-reconciler-queue-depth-${Environment}
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ReconcilerQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 5000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref LedgerAlerts
+
+  LedgerDbCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub payments-ledger-db-cpu-${Environment}
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref LedgerDb
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref LedgerAlerts
+
 Outputs:
   ArchiveBucket:
     Value: !Ref EventsArchive
@@ -188,3 +571,11 @@ Outputs:
     Value: !GetAtt LedgerDb.Endpoint.Address
   NatGatewayId:
     Value: !Ref ReconcilerNatGateway
+  ApiEndpoint:
+    Value: !GetAtt ApiLoadBalancer.DNSName
+  CacheEndpoint:
+    Value: !GetAtt SessionCache.PrimaryEndPoint.Address
+  ReconcilerQueueUrl:
+    Value: !Ref ReconcilerQueue
+  ReportsBucket:
+    Value: !Ref ReconcilerReports
