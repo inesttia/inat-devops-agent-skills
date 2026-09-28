@@ -13,7 +13,7 @@ Autonomous agents and CI pipelines can tell you whether a template is valid and 
 - **Change set first.** Uses `cloudformation:CreateChangeSet` against the target stack so Conditions, Parameters, Mappings, Transforms, and nested stacks are resolved by CloudFormation rather than guessed. Falls back to a static base-versus-head template diff when a change set cannot be created, and labels the preview accordingly.
 - **Topology cross-check.** For each addition, looks for a matching live resource outside the stack and flags possible duplicates. For each removal or replacement, lists the live resources that depend on it.
 - **Live, per-Region pricing.** Every rate is a `pricing:GetProducts` lookup for the stack's Region on this run. No rate ships with the skill. Unresolved rates are reported as *not priced*, never as `$0.00`.
-- **Verified against the pricing pages.** Each rate is then checked with the DevOps Agent **verify claims** system skill against the service's published pricing reference for the target Region. Rows carry a marker: ✓ verified, ⚠ mismatch (API figure used, documented figure shown), 📄 documented (pricing page used because the API lookup was unresolved), — unverified.
+- **Billing model verified against the documentation.** The DevOps Agent **verify claims** system skill checks the model behind each figure (what is billed, in which unit, what is included, what changes the price) against `docs.aws.amazon.com`. Rows carry a marker: ✓ verified, ⚠ mismatch (formula or filters re-checked; contradiction disclosed), — unverified. The documentation publishes no dollar rates, so every figure still comes from the Price List API.
 - **Fixed versus usage-based discipline.** Instance hours, node hours, gateway hours, load balancer hours, provisioned capacity, storage, keys, and secrets are estimated. Requests, bytes, and invocations are named with their unit rate and excluded from the total unless the user supplies a volume.
 - **One table, one total.** A row per resource with its change (Add, Modify, Remove, Replace), sizing, live rate, and monthly cost, then a total fixed monthly estimate. Markdown, so it renders in chat and in a pull request comment.
 - **Read-mostly.** The only write is the change set, which never touches a resource and is deleted when the preview is done.
@@ -22,7 +22,7 @@ Autonomous agents and CI pipelines can tell you whether a template is valid and 
 
 - AWS DevOps Agent with access to the target account and Region.
 - A repository integration (GitHub or GitLab) in the Agent Space if you want the skill to read pull requests directly. Without one, paste the base and head templates into the conversation.
-- The DevOps Agent **verify claims** system skill enabled in the Agent Space. Without it the preview still runs, but every rate is marked unverified and the pricing-page fallback for unresolved lookups is unavailable.
+- The DevOps Agent **verify claims** system skill enabled in the Agent Space. It reads `docs.aws.amazon.com` only. Without it the preview still runs, but every row is marked unverified.
 - IAM permissions on the role the Agent Space assumes, in addition to the default read-only managed policy:
 
 ```json

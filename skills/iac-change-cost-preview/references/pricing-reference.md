@@ -264,38 +264,34 @@ If a prefixed lookup returns zero products, check the exact value with `pricing:
 
 ---
 
-## Verifying rates with the verify claims system skill
+## Verifying the billing model with the verify claims system skill
 
-After the Price List lookup, phrase each rate as a claim against the service's public pricing page for the target Region and hand it to the DevOps Agent **verify claims** system skill (SKILL.md Step 5b). Use the Region's display name on the page (for example eu-west-1 is "Europe (Ireland)"). When the API lookup is unresolved, the page is the fallback source and the row is marked 📄 documented.
+The verify claims system skill reads `docs.aws.amazon.com` only. The documentation does not publish dollar rates, so the skill cannot confirm a figure; it confirms the **billing model** the figure is applied to (SKILL.md Step 5b). For each fixed-cost resource type, check the claims below against the page listed. A confirmed claim marks the row ✓; a contradicted claim means the formula or the filters are wrong and the rate must be re-resolved.
 
-| Resource type | Pricing page for the claim | Section on the page |
+Do not send `aws.amazon.com/.../pricing/` URLs to verify claims; they are outside its allowed domain.
+
+| Resource type | Documentation page | Billing-model claims to verify |
 |---|---|---|
-| `AWS::EC2::Instance`, `AutoScalingGroup` | https://aws.amazon.com/ec2/pricing/on-demand/ | On-Demand instance hourly rate by OS and Region |
-| `AWS::EC2::Volume` | https://aws.amazon.com/ebs/pricing/ | Volume type GB-month, provisioned IOPS and throughput |
-| `AWS::EC2::NatGateway`, `AWS::EC2::EIP` | https://aws.amazon.com/vpc/pricing/ | NAT Gateway hourly and per-GB; Public IPv4 address hourly |
-| `AWS::ElasticLoadBalancingV2::LoadBalancer` | https://aws.amazon.com/elasticloadbalancing/pricing/ | Application / Network / Gateway Load Balancer hourly and LCU |
-| `AWS::RDS::DBInstance` | https://aws.amazon.com/rds/pricing/ (engine tab) | On-Demand instance hourly, Single-AZ vs Multi-AZ; storage GB-month |
-| Aurora `DBCluster` / `DBInstance` | https://aws.amazon.com/rds/aurora/pricing/ | Provisioned instance hourly; Serverless v2 ACU-hour; storage and I/O |
-| `AWS::ElastiCache::*` | https://aws.amazon.com/elasticache/pricing/ | On-Demand node hourly by engine |
-| `AWS::DynamoDB::Table` | https://aws.amazon.com/dynamodb/pricing/provisioned/ | Read and write capacity unit hourly; storage GB-month |
-| `AWS::OpenSearchService::Domain` | https://aws.amazon.com/opensearch-service/pricing/ | Instance hourly; EBS storage GB-month |
-| `AWS::EKS::Cluster` | https://aws.amazon.com/eks/pricing/ | Cluster hourly |
-| `AWS::KMS::Key` | https://aws.amazon.com/kms/pricing/ | Customer managed key per month |
-| `AWS::SecretsManager::Secret` | https://aws.amazon.com/secrets-manager/pricing/ | Per secret per month |
-| `AWS::CloudWatch::Alarm` | https://aws.amazon.com/cloudwatch/pricing/ | Alarm per month, standard vs high resolution |
+| Price List API (all rows) | https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/reading-an-offer.html · https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/using-price-list-query-api.html | The On-Demand rate is `pricePerUnit.USD` of the price dimension with `beginRange` 0; `GetProducts` filters are exact `TERM_MATCH` on attribute values; the endpoint Region is separate from the priced Region. |
+| `AWS::EC2::Instance`, `AutoScalingGroup` | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-on-demand-instances.html · https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/dedicated-instance.html | On-Demand instances are billed per second (Linux) or per hour (Windows) with no long-term commitment; the rate depends on instance type, OS, Region, and tenancy; Dedicated tenancy carries a different rate. |
+| `AWS::EC2::Volume`, `BlockDeviceMappings` | https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html · https://docs.aws.amazon.com/ebs/latest/userguide/provisioned-iops.html | gp3 includes 3,000 IOPS and 125 MiB/s baseline; IOPS and throughput above the baseline are billed separately; io1/io2 bill provisioned IOPS in full; storage is billed per GB-month of provisioned size. |
+| `AWS::EC2::NatGateway` | https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-basics.html | A NAT gateway is billed per hour it is provisioned and per GB of data processed, plus standard data transfer. |
+| `AWS::EC2::EIP`, public IPv4 | https://docs.aws.amazon.com/vpc/latest/userguide/vpc-ip-addressing.html | Public IPv4 addresses (Elastic IPs and auto-assigned) are charged per hour while in use; this applies to NAT gateway and load balancer addresses as well. |
+| `AWS::ElasticLoadBalancingV2::LoadBalancer` | https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html · https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html | A load balancer is billed per hour (or partial hour) it runs, plus Load Balancer Capacity Units consumed; the hourly component does not depend on traffic. |
+| `AWS::RDS::DBInstance` | https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/User_DBInstanceBilling.html · https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html · https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html | Instance hours are billed per DB instance class, engine, license model, and deployment option; a Multi-AZ deployment is priced as one Multi-AZ instance that includes the standby, not two instances; allocated storage is billed per GB-month at a Multi-AZ rate when Multi-AZ; gp3 provisioned IOPS above the included baseline are billed separately. |
+| Aurora `DBCluster` / `DBInstance` | https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.how-it-works.html · https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.StorageReliability.html | Provisioned Aurora bills each DB instance per hour by class; Serverless v2 bills per ACU-hour between the configured minimum and maximum capacity; storage is billed per GB-month as it grows and I/O per request unless the cluster uses I/O-Optimized. |
+| `AWS::ElastiCache::*` | https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/CacheNodes.html · https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Replication.html | Node-based clusters bill per node-hour by node type and engine; a replication group bills every primary and replica node; Serverless bills per GB-hour of data stored and per ECPU. |
+| `AWS::DynamoDB::Table` | https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/provisioned-capacity-mode.html · https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/on-demand-capacity-mode.html | Provisioned mode bills per RCU-hour and WCU-hour for the table and each GSI regardless of use; on-demand mode bills per request unit; storage is billed per GB-month in both modes. |
+| `AWS::OpenSearchService::Domain` | https://docs.aws.amazon.com/opensearch-service/latest/developerguide/supported-instance-types.html · https://docs.aws.amazon.com/opensearch-service/latest/developerguide/sizing-domains.html | Data, dedicated master, and warm nodes are each billed per instance-hour by type; EBS storage attached to data nodes is billed per GB-month. |
+| `AWS::EKS::Cluster` | https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html | A cluster is billed per hour; clusters on a Kubernetes version in extended support bill at a higher hourly tier than standard support. Check the template's `Version` against the page before choosing the price dimension. |
+| `AWS::KMS::Key` | https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html | Customer managed keys incur a monthly fee per key (prorated hourly) plus a per-request charge above the free tier; AWS managed keys do not carry the monthly fee. |
+| `AWS::SecretsManager::Secret` | https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html | Each secret is billed per month (prorated) plus per API call. |
+| `AWS::CloudWatch::Alarm` | https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch_billing.html | Alarms are billed per alarm-month; high-resolution alarms and metric-math alarms with several metrics bill more; composite alarms bill per alarm. |
 
-Claim wording that verifies cleanly names the service, the exact configuration, the purchase option, the Region, the figure, and the unit:
-
-```text
-Amazon RDS for PostgreSQL db.r6g.large Multi-AZ On-Demand in Europe (Ireland) costs $x.xxxx per hour.
-Amazon EBS gp3 storage in Europe (Ireland) costs $x.xxx per GB-month.
-AWS KMS customer managed key in Europe (Ireland) costs $x.xx per month.
-```
-
-A mismatch between the API and the page most often means the API filters selected a different product (tenancy, license model, deployment option, OS). Re-check the filters before reporting the mismatch.
+If a lookup in Step 5 returned zero products, use the same pages to confirm *how* the resource is billed (hourly, GB-month, per request) and which attributes change the price, then correct the filter and retry. The documentation never supplies the rate itself.
 
 ---
 
-## Reference links
+## Reference links (for readers; not usable by verify claims)
 
 [EC2](https://aws.amazon.com/ec2/pricing/on-demand/) · [EBS](https://aws.amazon.com/ebs/pricing/) · [VPC / NAT / public IPv4](https://aws.amazon.com/vpc/pricing/) · [ELB](https://aws.amazon.com/elasticloadbalancing/pricing/) · [RDS](https://aws.amazon.com/rds/pricing/) · [Aurora](https://aws.amazon.com/rds/aurora/pricing/) · [ElastiCache](https://aws.amazon.com/elasticache/pricing/) · [DynamoDB](https://aws.amazon.com/dynamodb/pricing/provisioned/) · [OpenSearch](https://aws.amazon.com/opensearch-service/pricing/) · [EKS](https://aws.amazon.com/eks/pricing/) · [KMS](https://aws.amazon.com/kms/pricing/) · [Secrets Manager](https://aws.amazon.com/secrets-manager/pricing/) · [Price List API](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/price-changes.html)

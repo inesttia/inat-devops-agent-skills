@@ -1,6 +1,6 @@
 ---
 name: iac-change-cost-preview
-description: Previews the monthly cost impact of an infrastructure-as-code change before it is deployed. Use when a user asks what a pull request, branch, commit, or CloudFormation template change will add to, remove from, or resize in an AWS account and what that will cost per month; when reviewing a PR that touches CloudFormation, SAM, or CDK-synthesized templates; or when asked to compare a template against the resources already running in an account. Determines the exact resource additions, modifications, and removals with a CloudFormation change set (falling back to a static template diff), cross-checks new resources against the live account topology for duplicates and blast radius, prices every fixed-cost resource with a live AWS Price List API lookup for the target Region, and checks each rate against the service's published pricing reference with the verify claims system skill. Never hardcodes a rate and never estimates usage-based charges without a stated assumption.
+description: Previews the monthly cost impact of an infrastructure-as-code change before it is deployed. Use when a user asks what a pull request, branch, commit, or CloudFormation template change will add to, remove from, or resize in an AWS account and what that will cost per month; when reviewing a PR that touches CloudFormation, SAM, or CDK-synthesized templates; or when asked to compare a template against the resources already running in an account. Determines the exact resource additions, modifications, and removals with a CloudFormation change set (falling back to a static template diff), cross-checks new resources against the live account topology for duplicates and blast radius, prices every fixed-cost resource with a live AWS Price List API lookup for the target Region, and checks the billing model behind each rate against the AWS documentation with the verify claims system skill. Never hardcodes a rate and never estimates usage-based charges without a stated assumption.
 metadata:
   author: inesttia
   version: "1.0.0"
@@ -14,7 +14,7 @@ metadata:
 
 This skill answers one question for an infrastructure change that has not been deployed yet: **what will this add to the account, and what will it cost per month?**
 
-It works on CloudFormation templates (including SAM templates and CDK-synthesized output) coming from a pull request, a branch, a commit, or pasted directly into the conversation. It produces one table with a row per resource that will be created, modified, or removed, showing the sizing that drives its cost, the live per-Region rate with a verification marker, and its monthly cost, followed by a total fixed monthly estimate. Each rate is checked against the service's published pricing reference with the DevOps Agent **verify claims** system skill. Usage-based charges are named, not guessed.
+It works on CloudFormation templates (including SAM templates and CDK-synthesized output) coming from a pull request, a branch, a commit, or pasted directly into the conversation. It produces one table with a row per resource that will be created, modified, or removed, showing the sizing that drives its cost, the live per-Region rate with a verification marker, and its monthly cost, followed by a total fixed monthly estimate. The billing model behind each rate (what is billed, in which unit, what is included) is checked against the AWS documentation with the DevOps Agent **verify claims** system skill. Usage-based charges are named, not guessed.
 
 The skill is read-mostly. Its only write operation is creating a CloudFormation change set, which does not touch any resource and is deleted when the preview is done.
 
@@ -30,7 +30,7 @@ Show each `use_aws` call, each rate lookup, and the change set identifier in the
 - [ ] Step 3: Cross-check additions and removals against the live topology
 - [ ] Step 4: Extract the sizing properties that drive cost
 - [ ] Step 5: Resolve a live rate for every fixed-cost resource
-- [ ] Step 5b: Verify each rate against the published pricing reference (verify claims)
+- [ ] Step 5b: Verify the billing model behind each rate against the documentation (verify claims)
 - [ ] Step 6: Compute the monthly delta
 - [ ] Step 7: Report in the fixed layout
 - [ ] Step 8: Validate before reporting
@@ -43,9 +43,9 @@ These rules are referenced by name throughout the steps.
 
 **Fixed versus usage-based rule.** A charge is *fixed* when it accrues per hour or per month regardless of traffic: instance hours, node hours, gateway hours, load balancer hours, provisioned capacity, allocated storage, keys, secrets. A charge is *usage-based* when it depends on requests, bytes, invocations, or data processed. Estimate fixed charges. For usage-based charges, print the price dimension and its unit rate and mark the line **usage-based, not estimated**, unless the user has supplied a volume assumption, in which case compute it and print the assumption next to the figure.
 
-**Live rate rule.** Every rate comes from the AWS Price List API on this run, resolved for the target Region, following `references/pricing-reference.md`. Never hardcode a rate, recall one from memory, or carry one over from an earlier preview. If a lookup cannot be resolved and the Verify claims rule cannot supply a documented rate either, the line is **not priced: rate unavailable** with the reason. Never print `$0.00` for an unresolved rate.
+**Live rate rule.** Every rate comes from the AWS Price List API on this run, resolved for the target Region, following `references/pricing-reference.md`. It is the only source of dollar figures: never hardcode a rate, recall one from memory, read one from a web page, or carry one over from an earlier preview. If a lookup cannot be resolved, the line is **not priced: rate unavailable** with the reason. Never print `$0.00` for an unresolved rate.
 
-**Verify claims rule.** After a rate is resolved, apply the DevOps Agent system skill **verify claims** to check it against the service's published pricing reference for the target Region (the pricing page links are in `references/pricing-reference.md`). Each rate ends up in one of four states, and the state is shown in the report: **verified** (API and pricing page agree), **mismatch** (they differ: keep the API figure in the total, show the documented figure next to it, and flag the row), **documented** (the API lookup could not be resolved, so the figure comes from the pricing page through verify claims and is labelled as such), or **unverified** (verify claims is not available in this Agent Space, or the page has no figure for that Region). A mismatch or an unverified rate never blocks the preview; it is disclosed.
+**Verify claims rule.** The Price List API gives the number; the AWS documentation gives the billing model the number is applied to. For every fixed-cost resource, apply the DevOps Agent system skill **verify claims** to check the billing-model claims behind the formula against the service's documentation on `docs.aws.amazon.com` (page list in `references/pricing-reference.md`): what is billed, in which unit, what is included, and what changes the price (Multi-AZ, tenancy, license model, support tier). The documentation does not publish dollar rates, so verify claims never confirms or supplies a figure. Each row ends up **verified** (the documentation confirms the model the formula uses), **mismatch** (the documentation contradicts it: fix the formula or the filters and re-resolve the rate before reporting), or **unverified** (the skill is not available in this Agent Space, or the documentation is silent on that point). A mismatch that cannot be resolved is disclosed on the row; it never silently stays in the total.
 
 **Region rule.** The target Region is the Region the stack is (or will be) deployed in. Take it from the stack, the pipeline configuration, or the user. Never default to us-east-1 and never use the Agent Space Region. The Pricing API endpoint is always us-east-1; that is a different thing.
 
@@ -167,27 +167,35 @@ Rules that apply to every lookup (Live rate rule):
 - Cache each resolved rate as (ServiceCode, filters, Region) for the rest of the preview; identical resources reuse it.
 - Name the price dimension behind every figure in the report: ServiceCode, filter field and value, unit. An unnamed rate is not verified.
 
-### Step 5b: Verify each rate against the published pricing reference
+### Step 5b: Verify the billing model behind each rate
 
-Apply the **verify claims** system skill to every rate from Step 5 (Verify claims rule). Phrase each claim so it can be checked against the service's pricing page for the target Region, for example:
+Apply the **verify claims** system skill to the model claims behind every fixed-cost row (Verify claims rule). The skill reads `docs.aws.amazon.com` only; do not point it at `aws.amazon.com/.../pricing/` pages, they are outside its scope and carry no verifiable statements for it. `references/pricing-reference.md` lists, per resource type, the documentation page and the claims to check. Phrase each claim as a statement about how the service bills, not about a dollar amount:
 
 ```text
-Claim: Amazon RDS for PostgreSQL, db.r6g.large, Multi-AZ, On-Demand, eu-west-1 costs $x.xxxx per hour.
-Source to check: https://aws.amazon.com/rds/pricing/ (Region: Europe (Ireland))
-Claim: Amazon EC2 NAT gateway hourly charge in eu-west-1 is $x.xxx per hour.
-Source to check: https://aws.amazon.com/vpc/pricing/
+Claim: An Amazon RDS Multi-AZ DB instance deployment is billed as a single Multi-AZ instance rate that includes the standby; the standby is not billed as a second instance.
+Check: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html
+
+Claim: A NAT gateway is billed per hour that it is provisioned and per GB of data it processes.
+Check: https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-basics.html
+
+Claim: gp3 volumes include 3,000 IOPS and 125 MiB/s of throughput; only IOPS and throughput provisioned above that are billed separately.
+Check: https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html
+
+Claim: In the Price List API, the On-Demand rate is pricePerUnit.USD of the price dimension whose beginRange is 0.
+Check: https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/reading-an-offer.html
 ```
 
-Record the outcome per rate:
+Record the outcome per row:
 
 | Outcome | What to do |
 |---|---|
-| verified | Use the API figure. Mark the row ✓. |
-| mismatch | Use the API figure in the total. Show the documented figure in the Rate sources line (`page shows $y.yyyy`) and mark the row ⚠. A mismatch usually means a filter picked the wrong product (tenancy, license model, deployment option); re-check the filters before reporting. |
-| documented | Only when the Step 5 lookup was unresolved after the `GetAttributeValues` retry. Use the figure verify claims read from the pricing page for the target Region, mark the row 📄, and name the page as the source instead of a price dimension. |
-| unverified | Use the API figure, mark the row —, and say why in the Verification line (skill not available, or the page has no figure for the Region). |
+| verified | The documentation confirms the dimension, unit, and inclusions the formula uses. Mark the row ✓. |
+| mismatch | The documentation contradicts the formula or the filter choice (for example the documentation says the standby is included but the formula doubled the instance hours, or the Kubernetes version is in extended support and bills at a different tier). Fix the formula or the filters, re-resolve the rate in Step 5, and re-verify. If it still cannot be reconciled, mark the row ⚠ and state the contradiction in the Verification line. |
+| unverified | Verify claims is not available in this Agent Space, or the documentation does not address the point. Mark the row — and say why in the Verification line. |
 
-If the verify claims skill is not available in the Agent Space, say so once in the Verification line and mark every rate unverified; do not stop the preview. Verify claims reads documentation; it never replaces the change set as the source of *what* changes.
+When a Step 5 lookup is unresolved after the `GetAttributeValues` retry, verify claims can still help choose the right filter: check the documentation for how the resource is billed (hourly, per GB-month, per request) and which configuration attributes change the price, then retry the lookup with the corrected filter. It cannot supply the rate itself; if the retry still returns nothing, the row is **not priced**.
+
+If verify claims is not available in the Agent Space, say so once in the Verification line and mark every row unverified; do not stop the preview. Verify claims reads documentation; it never replaces the change set as the source of *what* changes, and never replaces the Price List API as the source of *how much*.
 
 ## Step 6: Compute the monthly delta
 
@@ -223,16 +231,16 @@ Changes from change set `<id>` (deleted after preview) · rates: live AWS Price 
 | LedgerDb | AWS::RDS::DBInstance | Add | db.r6g.large · PostgreSQL 16 · Multi-AZ | $x.xxxx / Hrs ✓ | $xxx.xx |
 | LedgerDb · storage | | | 200 GB gp3 · Multi-AZ | $x.xxx / GB-Mo ✓ | $xx.xx |
 | ReconcilerNatGateway | AWS::EC2::NatGateway | Add | 1 gateway (data processed usage-based) | $x.xxx / Hrs ✓ | $xx.xx |
-| ReconcilerNatEip | AWS::EC2::EIP | Add | 1 public IPv4 | $x.xxx / Hrs ⚠ | $x.xx |
-| LedgerKey | AWS::KMS::Key | Add | 1 key | $x.xx / key-month 📄 | $x.xx |
+| ReconcilerNatEip | AWS::EC2::EIP | Add | 1 public IPv4 | $x.xxx / Hrs — | $x.xx |
+| LedgerKey | AWS::KMS::Key | Add | 1 key | $x.xx / key-month ✓ | $x.xx |
 | LedgerIndex | AWS::DynamoDB::Table | Modify | on-demand → 50 RCU / 25 WCU | $x.xxxxx / RCU-Hr · $x.xxxxx / WCU-Hr ✓ | +$xx.xx |
 | EventsArchive | AWS::S3::Bucket | Add | — | $x.xxx / GB-Mo · $x.xxx / 1K requests | usage-based |
 | ReconcilerLogs | AWS::Logs::LogGroup | Add | 30-day retention | $x.xx / GB ingested | usage-based |
 | LedgerDbSubnetGroup | AWS::RDS::DBSubnetGroup | Add | — | — | no charge |
 | **Total fixed monthly estimate** | | | | | **+$x,xxx.xx** |
 
-Rate sources: LedgerDb → AmazonRDS instanceType=db.r6g.large, databaseEngine=PostgreSQL, deploymentOption=Multi-AZ (Hrs); LedgerDb · storage → AmazonRDS usagetype=EU-RDS:Multi-AZ-GP3-Storage (GB-Mo); ReconcilerNatEip → AmazonVPC usagetype=EU-PublicIPv4:InUseAddress (Hrs), page shows $y.yyy; LedgerKey → AWS KMS pricing page, Europe (Ireland), customer managed key per month (Price List lookup unresolved); …
-Verification: verify claims checked n rates against the published pricing pages for eu-west-1 · ✓ verified · ⚠ mismatch (API figure used) · 📄 documented (from pricing page, API unresolved) · — unverified
+Rate sources: LedgerDb → AmazonRDS instanceType=db.r6g.large, databaseEngine=PostgreSQL, deploymentOption=Multi-AZ (Hrs); LedgerDb · storage → AmazonRDS usagetype=EU-RDS:Multi-AZ-GP3-Storage (GB-Mo); ReconcilerNatGateway → AmazonEC2 usagetype=EU-NatGateway-Hours (Hrs); LedgerKey → awskms usagetype=EU-KMS-Keys (Keys); …
+Verification: verify claims checked the billing model behind n rows against docs.aws.amazon.com · ✓ model verified · ⚠ mismatch (see note) · — unverified (ReconcilerNatEip: documentation does not state the per-hour unit for in-use public IPv4 addresses)
 Assumptions: parameters defaulted: DbSubnetIds, NatPublicSubnetId · OS assumed Linux for <LogicalId>
 Not priced: <LogicalId> (rate unavailable: <ServiceCode>, <field>=<value>, <Region>)
 ```
@@ -241,8 +249,8 @@ Rules for the table:
 
 - **Change** is `Add`, `Modify`, `Remove`, or `Replace` (a Modify with `Replacement: True`). A `Remove` row shows a negative monthly cost. A `Modify` row shows the delta with a sign and the old → new sizing.
 - **Monthly cost** is a dollar figure only for fixed charges (Fixed versus usage-based rule). Usage-based resources show `usage-based` in that column and their unit rate in **Live rate**; if the user supplied a volume, show the computed figure with the assumption in **Sizing** (for example `2 TB/month assumed`) and keep it out of the fixed total. Resources with no charge show `no charge`. Unresolved rates show `not priced`, never `$0.00`.
-- **Live rate** is the resolved `pricePerUnit.USD` and unit, followed by its verification marker from Step 5b (✓ verified, ⚠ mismatch, 📄 documented, — unverified). The full price dimension (ServiceCode, filter field and value) goes in the **Rate sources** line under the table so every figure stays traceable without widening the table; a mismatch also shows the documented figure there.
-- The **Verification** line is always present. It states how many rates verify claims checked and the legend for the markers, or that the skill was not available.
+- **Live rate** is the resolved `pricePerUnit.USD` and unit, followed by its billing-model marker from Step 5b (✓ verified, ⚠ mismatch, — unverified). The full price dimension (ServiceCode, filter field and value) goes in the **Rate sources** line under the table so every figure stays traceable without widening the table.
+- The **Verification** line is always present. It states how many rows verify claims checked against the documentation, the legend for the markers, and the reason for every ⚠ and —, or that the skill was not available.
 - Sort rows by monthly cost, largest first, then usage-based, then no-charge and not-priced rows. The **Total fixed monthly estimate** row is always last and sums only the dollar figures above it.
 - Add a **Topology** line under the table only when there is something to say: `possible duplicate of <physical id> (not in stack)` for an Add, or `dependents: <list>` for a Remove or Replace.
 - If the change set could not be created, the header line reads `Changes from static diff (change set unavailable: <reason>)` and a **Limitations** line lists the unresolved constructs.
@@ -254,8 +262,8 @@ Check every item. Fix the report if any fails.
 - [ ] The source of changes is stated: change set ID, or static diff with the reason.
 - [ ] Every dollar figure in the table traces to a change set entry (or static diff entry) and to a price dimension named in the Rate sources line with ServiceCode, filter field and value, and unit.
 - [ ] No rate was hardcoded, recalled, or reused from a previous preview.
-- [ ] Every rate carries a verification marker, and every ⚠ mismatch shows the documented figure in the Rate sources line and had its filters re-checked.
-- [ ] Every 📄 documented rate names the pricing page and Region it came from, and the Step 5 lookup it replaces was unresolved after the `GetAttributeValues` retry.
+- [ ] Every fixed-cost row carries a billing-model marker, every ⚠ and — has its reason in the Verification line, and every ⚠ had its formula and filters re-checked against the documentation before reporting.
+- [ ] No dollar figure came from anywhere but the Price List API; verify claims contributed model checks only.
 - [ ] No usage-based charge is inside the total row without a stated assumption in its Sizing cell.
 - [ ] No `$0.00` appears for an unresolved rate; those rows say `not priced` and the Not priced line gives the reason.
 - [ ] The target Region is the stack's Region, not the Agent Space Region, and it appears in the header.
@@ -273,7 +281,7 @@ This skill ships with no account, Region, stack, repository, or rate values. Res
 | Target account and Region | Pipeline configuration or the user; Region rule | Both appear in the report header |
 | Stack name | Pipeline configuration or the user; `DescribeStacks` confirms existence | Change set type (CREATE or UPDATE) is decided |
 | Parameters | Pipeline configuration; template defaults otherwise | Defaulted parameters are listed in the Assumptions line |
-| Rates | Live Price List lookups per `references/pricing-reference.md`, checked with the verify claims system skill | Each figure names its price dimension and carries a verification marker |
+| Rates | Live Price List lookups per `references/pricing-reference.md`; billing model checked against docs.aws.amazon.com with the verify claims system skill | Each figure names its price dimension and carries a billing-model marker |
 | Topology | Resource-discovery tools in the Agent Space, if present | A Topology line appears when there is a duplicate or dependency to report, or the report says topology was unavailable |
 
 ## Limitations
@@ -282,5 +290,5 @@ This skill ships with no account, Region, stack, repository, or rate values. Res
 - Usage-based charges are never estimated without a user-supplied volume. The preview is a floor for fixed charges, not a total bill.
 - A static diff cannot resolve Conditions, `Fn::If`, Transforms, or nested stacks; when the change set path is unavailable the additions list may be incomplete or overstated, and the report says so.
 - Savings Plans, Reserved Instances, private pricing, and free tier are not applied; every rate is public On-Demand.
-- Verification depends on the verify claims system skill being available in the Agent Space. Without it, rates are still resolved from the Price List API but are marked unverified.
+- Verification depends on the verify claims system skill being available in the Agent Space, and that skill reads docs.aws.amazon.com only, where no dollar rates are published. It verifies the billing model behind each figure, not the figure. Without it, rates are still resolved from the Price List API but are marked unverified.
 - Creating a change set requires `cloudformation:CreateChangeSet`, `DescribeChangeSet`, `DeleteChangeSet`, `DescribeStacks`, and (for CREATE type) `DeleteStack` on the review placeholder stack. Without them the skill falls back to the static diff.
