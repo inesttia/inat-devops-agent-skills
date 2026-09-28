@@ -264,6 +264,38 @@ If a prefixed lookup returns zero products, check the exact value with `pricing:
 
 ---
 
+## Verifying rates with the verify claims system skill
+
+After the Price List lookup, phrase each rate as a claim against the service's public pricing page for the target Region and hand it to the DevOps Agent **verify claims** system skill (SKILL.md Step 5b). Use the Region's display name on the page (for example eu-west-1 is "Europe (Ireland)"). When the API lookup is unresolved, the page is the fallback source and the row is marked 📄 documented.
+
+| Resource type | Pricing page for the claim | Section on the page |
+|---|---|---|
+| `AWS::EC2::Instance`, `AutoScalingGroup` | https://aws.amazon.com/ec2/pricing/on-demand/ | On-Demand instance hourly rate by OS and Region |
+| `AWS::EC2::Volume` | https://aws.amazon.com/ebs/pricing/ | Volume type GB-month, provisioned IOPS and throughput |
+| `AWS::EC2::NatGateway`, `AWS::EC2::EIP` | https://aws.amazon.com/vpc/pricing/ | NAT Gateway hourly and per-GB; Public IPv4 address hourly |
+| `AWS::ElasticLoadBalancingV2::LoadBalancer` | https://aws.amazon.com/elasticloadbalancing/pricing/ | Application / Network / Gateway Load Balancer hourly and LCU |
+| `AWS::RDS::DBInstance` | https://aws.amazon.com/rds/pricing/ (engine tab) | On-Demand instance hourly, Single-AZ vs Multi-AZ; storage GB-month |
+| Aurora `DBCluster` / `DBInstance` | https://aws.amazon.com/rds/aurora/pricing/ | Provisioned instance hourly; Serverless v2 ACU-hour; storage and I/O |
+| `AWS::ElastiCache::*` | https://aws.amazon.com/elasticache/pricing/ | On-Demand node hourly by engine |
+| `AWS::DynamoDB::Table` | https://aws.amazon.com/dynamodb/pricing/provisioned/ | Read and write capacity unit hourly; storage GB-month |
+| `AWS::OpenSearchService::Domain` | https://aws.amazon.com/opensearch-service/pricing/ | Instance hourly; EBS storage GB-month |
+| `AWS::EKS::Cluster` | https://aws.amazon.com/eks/pricing/ | Cluster hourly |
+| `AWS::KMS::Key` | https://aws.amazon.com/kms/pricing/ | Customer managed key per month |
+| `AWS::SecretsManager::Secret` | https://aws.amazon.com/secrets-manager/pricing/ | Per secret per month |
+| `AWS::CloudWatch::Alarm` | https://aws.amazon.com/cloudwatch/pricing/ | Alarm per month, standard vs high resolution |
+
+Claim wording that verifies cleanly names the service, the exact configuration, the purchase option, the Region, the figure, and the unit:
+
+```text
+Amazon RDS for PostgreSQL db.r6g.large Multi-AZ On-Demand in Europe (Ireland) costs $x.xxxx per hour.
+Amazon EBS gp3 storage in Europe (Ireland) costs $x.xxx per GB-month.
+AWS KMS customer managed key in Europe (Ireland) costs $x.xx per month.
+```
+
+A mismatch between the API and the page most often means the API filters selected a different product (tenancy, license model, deployment option, OS). Re-check the filters before reporting the mismatch.
+
+---
+
 ## Reference links
 
 [EC2](https://aws.amazon.com/ec2/pricing/on-demand/) · [EBS](https://aws.amazon.com/ebs/pricing/) · [VPC / NAT / public IPv4](https://aws.amazon.com/vpc/pricing/) · [ELB](https://aws.amazon.com/elasticloadbalancing/pricing/) · [RDS](https://aws.amazon.com/rds/pricing/) · [Aurora](https://aws.amazon.com/rds/aurora/pricing/) · [ElastiCache](https://aws.amazon.com/elasticache/pricing/) · [DynamoDB](https://aws.amazon.com/dynamodb/pricing/provisioned/) · [OpenSearch](https://aws.amazon.com/opensearch-service/pricing/) · [EKS](https://aws.amazon.com/eks/pricing/) · [KMS](https://aws.amazon.com/kms/pricing/) · [Secrets Manager](https://aws.amazon.com/secrets-manager/pricing/) · [Price List API](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/price-changes.html)
