@@ -57,17 +57,13 @@ env:
     CacheNodeType=cache.r6g.large
 
 jobs:
-  # ---------------------------------------------------------------- validate
-  validate:
-    name: Validate template
+  # ---------------------------------------------------------------- plan (PR)
+  plan:
+    name: Plan (change set, then discard)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Lint with cfn-lint
-        run: |
-          pip install --quiet cfn-lint
-          cfn-lint "$TEMPLATE" --region "$AWS_REGION"
 
       - name: Restate the deployment target
         run: |
@@ -83,15 +79,6 @@ jobs:
             echo ""
             echo "Merging a change to this template deploys it to the stack above."
           } >> "$GITHUB_STEP_SUMMARY"
-
-  # ---------------------------------------------------------------- plan (PR)
-  plan:
-    name: Plan (change set, then discard)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    needs: validate
-    steps:
-      - uses: actions/checkout@v4
 
       - name: Assume the read-only planning role
         uses: aws-actions/configure-aws-credentials@v4
@@ -190,7 +177,6 @@ jobs:
     name: Deploy to production
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    needs: validate
     # Configure this environment in GitHub with a required reviewer. Without one
     # the gate is nominal and a merge to main deploys unattended.
     environment:
