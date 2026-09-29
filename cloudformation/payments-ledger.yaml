@@ -233,7 +233,9 @@ Resources:
     Properties:
       DBInstanceIdentifier: !Sub payments-ledger-${Environment}
       Engine: postgres
-      EngineVersion: '16'
+      # Pin a supported minor. A bare major ('16') is rejected for new instances:
+      # RDS deprecates the bare-major alias for every PostgreSQL major up to 17.
+      EngineVersion: '16.8'
       DBInstanceClass: !Ref DbInstanceClass
       MultiAZ: true
       AllocatedStorage: !Ref DbAllocatedStorageGb
