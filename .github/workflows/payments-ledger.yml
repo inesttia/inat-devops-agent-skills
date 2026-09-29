@@ -1,0 +1,224 @@
+name: payments-ledger
+
+# Deployment pipeline for cloudformation/payments-ledger.yaml.
+#
+# THIS REPOSITORY DEPLOYS THIS TEMPLATE. A pull request that changes the template
+# is a change to production infrastructure: once merged to main and approved, the
+# deploy job below creates or updates the `payments-ledger` stack in eu-west-1.
+# There is no separate deployment repository and no manual runbook; this file is
+# the deployment path.
+#
+# Two stages, deliberately asymmetric:
+#
+#   plan    — every pull request touching the template. Creates a CloudFormation
+#             change set, publishes the resource deltas to the job summary, then
+#             deletes the change set. Mutates nothing.
+#
+#   deploy  — a push to main, gated on the `production` GitHub environment. This
+#             stage creates real infrastructure that bills by the hour for as
+#             long as it exists.
+#
+# This file is also the deployment configuration. The stack name, the target
+# Region, and the parameter values a deploy passes are declared once below, in
+# the `env:` block. A cost preview of a pull request should read them from here
+# to resolve what the change costs and where — the Region in particular, since
+# rates are Region-specific and there is no other deployment config in the repo.
+
+on:
+  pull_request:
+    paths:
+      - 'cloudformation/payments-ledger.yaml'
+      - '.github/workflows/payments-ledger.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'cloudformation/payments-ledger.yaml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write      # OIDC federation into AWS; no long-lived keys in this repo
+  contents: read
+
+env:
+  TEMPLATE: cloudformation/payments-ledger.yaml
+
+  # --- deployment configuration: the single source of truth for this stack ---
+  STACK_NAME: payments-ledger
+  AWS_REGION: eu-west-1
+  # Parameters a deploy passes. Parameters not listed here use the template's
+  # own defaults, which is the case for VpcId, DbSubnetIds, NatPublicSubnetId
+  # and PublicSubnetIds.
+  STACK_PARAMETERS: >-
+    Environment=prod
+    DbInstanceClass=db.r6g.large
+    DbAllocatedStorageGb=200
+    WorkerInstanceType=m6g.large
+    WorkerDesiredCapacity=2
+    CacheNodeType=cache.r6g.large
+
+jobs:
+  # ---------------------------------------------------------------- validate
+  validate:
+    name: Validate template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint with cfn-lint
+        run: |
+          pip install --quiet cfn-lint
+          cfn-lint "$TEMPLATE" --region "$AWS_REGION"
+
+      - name: Restate the deployment target
+        run: |
+          {
+            echo "### Deployment target"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Template | \`$TEMPLATE\` |"
+            echo "| Stack | \`$STACK_NAME\` |"
+            echo "| Region | \`$AWS_REGION\` |"
+            echo "| Parameters | \`$STACK_PARAMETERS\` |"
+            echo ""
+            echo "Merging a change to this template deploys it to the stack above."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- plan (PR)
+  plan:
+    name: Plan (change set, then discard)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the read-only planning role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: eu-west-1
+          role-session-name: payments-ledger-plan-${{ github.run_id }}
+
+      - name: Create and describe a change set
+        id: cs
+        run: |
+          set -euo pipefail
+          NAME="cost-preview-${GITHUB_SHA::8}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+          # Build the --parameters JSON from STACK_PARAMETERS
+          python3 - <<'PY' > /tmp/params.json
+          import json, os
+          pairs = os.environ["STACK_PARAMETERS"].split()
+          print(json.dumps([
+              {"ParameterKey": k, "ParameterValue": v}
+              for k, v in (p.split("=", 1) for p in pairs)
+          ]))
+          PY
+
+          if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
+            TYPE=UPDATE
+          else
+            TYPE=CREATE
+          fi
+          echo "type=$TYPE" >> "$GITHUB_OUTPUT"
+
+          aws cloudformation create-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$NAME" \
+            --change-set-type "$TYPE" \
+            --template-body "file://$TEMPLATE" \
+            --parameters file:///tmp/params.json \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --description "Read-only preview; deleted at the end of this job"
+
+          # A change set resolving to no changes fails the waiter; not a job failure.
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$STACK_NAME" --change-set-name "$NAME" 2>/dev/null \
+            || echo "no changes, or creation failed; see the description below"
+
+          aws cloudformation describe-change-set \
+            --stack-name "$STACK_NAME" --change-set-name "$NAME" \
+            > /tmp/changeset.json || true
+
+      - name: Publish the resource deltas
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+          p = pathlib.Path("/tmp/changeset.json")
+          print("### Change set\n")
+          if not p.exists() or not p.stat().st_size:
+              print("Change set could not be described. Nothing was deployed.")
+              raise SystemExit(0)
+          cs = json.loads(p.read_text())
+          print(f"Stack `{os.environ['STACK_NAME']}` in `{os.environ['AWS_REGION']}` · "
+                f"status **{cs.get('Status')}** {cs.get('StatusReason', '')}\n")
+          changes = cs.get("Changes") or []
+          if not changes:
+              print("No resource changes.")
+              raise SystemExit(0)
+          print("| Action | Logical ID | Type | Replacement |")
+          print("|---|---|---|---|")
+          for c in changes:
+              r = c.get("ResourceChange") or {}
+              print(f"| {r.get('Action','')} | `{r.get('LogicalResourceId','')}` | "
+                    f"`{r.get('ResourceType','')}` | {r.get('Replacement','n/a')} |")
+          print(f"\n**{len(changes)} resource change(s).** Merging this pull request "
+                f"deploys them, and they bill from the moment they exist.")
+          PY
+
+      - name: Delete the change set and any placeholder stack
+        if: always()
+        env:
+          NAME: ${{ steps.cs.outputs.name }}
+          TYPE: ${{ steps.cs.outputs.type }}
+        run: |
+          aws cloudformation delete-change-set \
+            --stack-name "$STACK_NAME" --change-set-name "$NAME" || true
+          # A CREATE change set leaves the stack in REVIEW_IN_PROGRESS; remove it.
+          if [ "$TYPE" = "CREATE" ]; then
+            STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+              --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE)
+            if [ "$STATUS" = "REVIEW_IN_PROGRESS" ]; then
+              aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            fi
+          fi
+
+  # ---------------------------------------------------------------- deploy (main)
+  deploy:
+    name: Deploy to production
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: validate
+    # Configure this environment in GitHub with a required reviewer. Without one
+    # the gate is nominal and a merge to main deploys unattended.
+    environment:
+      name: production
+      url: https://eu-west-1.console.aws.amazon.com/cloudformation/home?region=eu-west-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the deployment role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+          role-session-name: payments-ledger-deploy-${{ github.run_id }}
+
+      - name: Deploy the stack
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --stack-name "$STACK_NAME" \
+            --template-file "$TEMPLATE" \
+            --parameter-overrides $STACK_PARAMETERS \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --no-fail-on-empty-changeset
+
+      - name: Report the deployed stack
+        run: |
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].{Status:StackStatus,Updated:LastUpdatedTime}' \
+            --output table >> "$GITHUB_STEP_SUMMARY"
