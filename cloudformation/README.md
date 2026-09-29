@@ -2,9 +2,15 @@
 
 Deployment configuration used by the pipeline. The `iac-change-cost-preview` skill reads this file to resolve the stack name, target account, Region, and parameters for a pull request (its Step 0).
 
+<<<<<<< HEAD
 | Template | Stack name | Account | Target Region | Parameters |
 |---|---|---|---|---|
 | `payments-ledger.yaml` | `payments-ledger` | `<ACCOUNT_ID>` (fill in) | `eu-west-1` | `Environment=prod`, `DbInstanceClass=db.r6g.large`, `DbAllocatedStorageGb=200`, `WorkerInstanceType=m6g.large`, `WorkerDesiredCapacity=2`, `CacheNodeType=cache.r6g.large` (VPC and subnet parameters use template defaults) |
+=======
+| Template | Stack name | Target Region | Parameters |
+|---|---|---|---|
+| `payments-ledger.yaml` | `payments-ledger` | `eu-west-1` | `Environment=prod`, `DbInstanceClass=db.r6g.large`, `DbAllocatedStorageGb=200` (subnet parameters use template defaults) |
+>>>>>>> 8df811cdaff99d8a3f26ef66f1eff968c6a36091
 
 The stack is not deployed yet; a preview of this template is a `CREATE` change set.
 
