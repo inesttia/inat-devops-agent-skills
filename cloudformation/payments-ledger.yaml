@@ -51,6 +51,14 @@ Parameters:
     Type: String
     Default: cache.r6g.large
     Description: Node type for the session cache replication group.
+  ReportingInstanceType:
+    Type: String
+    Default: c7g.large
+    Description: Instance type for the two reporting batch hosts.
+  AnalyticsDbInstanceClass:
+    Type: String
+    Default: db.t4g.medium
+    Description: Instance class for the analytics read database.
 
 Resources:
   EventsArchive:
@@ -562,6 +570,79 @@ Resources:
       AlarmActions:
         - !Ref LedgerAlerts
 
+  # ------------------------------------------------------- reporting hosts
+  ReportingHostA:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+      InstanceType: !Ref ReportingInstanceType
+      SubnetId: !Select [0, !Ref DbSubnetIds]
+      SecurityGroupIds:
+        - !Ref WorkerSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 30
+            Encrypted: true
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpTokens: required
+      Tags:
+        - Key: Name
+          Value: !Sub payments-reporting-a-${Environment}
+        - Key: Environment
+          Value: !Ref Environment
+
+  ReportingHostB:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+      InstanceType: !Ref ReportingInstanceType
+      SubnetId: !Select [1, !Ref DbSubnetIds]
+      SecurityGroupIds:
+        - !Ref WorkerSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 30
+            Encrypted: true
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpTokens: required
+      Tags:
+        - Key: Name
+          Value: !Sub payments-reporting-b-${Environment}
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ------------------------------------------------------ analytics database
+  # MultiAZ is deliberately omitted: the provider default (single-AZ) applies.
+  AnalyticsDb:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub payments-analytics-${Environment}
+      Engine: postgres
+      EngineVersion: '16.9'
+      DBInstanceClass: !Ref AnalyticsDbInstanceClass
+      AllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !Ref LedgerKey
+      DBSubnetGroupName: !Ref LedgerDbSubnetGroup
+      MasterUsername: analytics_admin
+      ManageMasterUserPassword: true
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: payments
+
 Outputs:
   ArchiveBucket:
     Value: !Ref EventsArchive
@@ -581,3 +662,9 @@ Outputs:
     Value: !Ref ReconcilerQueue
   ReportsBucket:
     Value: !Ref ReconcilerReports
+  ReportingHostAId:
+    Value: !Ref ReportingHostA
+  ReportingHostBId:
+    Value: !Ref ReportingHostB
+  AnalyticsEndpoint:
+    Value: !GetAtt AnalyticsDb.Endpoint.Address
