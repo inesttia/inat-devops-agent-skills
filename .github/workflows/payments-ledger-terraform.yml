@@ -15,7 +15,7 @@ permissions:
   pull-requests: write
 
 env:
-  AWS_REGION: eu-west-1
+  AWS_REGION: ap-northeast-2
   TF_IN_AUTOMATION: "true"
 
 jobs:
