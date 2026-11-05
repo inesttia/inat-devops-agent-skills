@@ -7,9 +7,9 @@ terraform {
     }
   }
   backend "s3" {
-    bucket = "acme-tfstate-eu-west-1"
+    bucket = "acme-tfstate-ap-northeast-2"
     key    = "payments-ledger/terraform.tfstate"
-    region = "eu-west-1"
+    region = "ap-northeast-2"
   }
 }
 
